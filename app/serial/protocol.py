@@ -156,7 +156,12 @@ class ScannerProtocol:
     def get_received_channel_info(self) -> Optional[dict[str, str]]:
         """
         Query currently-received channel info (GLG command).
-        Returns None if scanner is idle.
+        Returns None if scanner is idle (squelch closed).
+
+        GLG response fields (positions 0-11):
+          0:FRQ/TGID  1:MOD  2:ATT  3:CTCSS/DCS
+          4:NAME1(sys)  5:NAME2(grp)  6:NAME3(ch)
+          7:SQL(0=closed/1=open)  8:MUT  9:SYS_TAG  10:CHAN_TAG  11:P25NAC
         """
         try:
             payload = self.send_command("GLG")
@@ -165,9 +170,14 @@ class ScannerProtocol:
         if not payload or payload.startswith("NG"):
             return None
         fields = payload.split(",")
-        keys = ["frequency", "mod", "att", "ctcss", "delay", "lockout",
-                "pri", "sys_name", "grp_name", "ch_name", "sql_code", "mute"]
-        return {keys[i]: fields[i] for i in range(min(len(keys), len(fields)))}
+        keys = ["frequency", "mod", "att", "ctcss",
+                "sys_name", "grp_name", "ch_name",
+                "sql", "mute", "sys_tag", "chan_tag", "p25nac"]
+        info = {keys[i]: fields[i] for i in range(min(len(keys), len(fields)))}
+        # SQL=1 means squelch open (active transmission); anything else = idle
+        if info.get("sql") != "1":
+            return None
+        return info
 
     def send_key(self, key: str, mode: str = "P") -> None:
         """
