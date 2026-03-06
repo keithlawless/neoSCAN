@@ -67,22 +67,33 @@ class _DownloadWorker(QThread):
         self.log_line.emit("Entering program mode…")
         proto.enter_program_mode()
 
-        # Get the first system index
+        # SIH = System Index Head — returns the first system's memory index,
+        # or -1 if no systems are programmed.  (FreeSCAN frmCommsDownload.vb:2344)
         self.log_line.emit("Querying system list…")
         try:
-            glf = proto.send_command("GLF")
+            sih = proto.send_command("SIH")
         except ProtocolError as e:
             proto.exit_program_mode()
-            raise RuntimeError(f"GLF failed: {e}") from e
+            raise RuntimeError(f"SIH failed: {e}") from e
 
-        first_sys_index = int(glf) if glf.isdigit() else 0
-        self.log_line.emit(f"First system index: {first_sys_index}")
+        try:
+            sys_index = int(sih)
+        except ValueError:
+            sys_index = -1
 
-        sys_index = first_sys_index
+        if sys_index == -1:
+            proto.exit_program_mode()
+            self.log_line.emit("Scanner reports no systems programmed.")
+            return config
+
+        self.log_line.emit(f"First system index: {sys_index}")
         sys_count = 0
         ch_count = 0
 
-        while sys_index > 0 and not self._abort:
+        # The linked list ends when the next-system field == -1.
+        # next-system field is at position 13 (1-indexed) = index 12 (0-indexed)
+        # for BCT15-X / BCD996XT.  (FreeSCAN: intPos=13, ParaParse 1-indexed)
+        while sys_index != -1 and not self._abort:
             self.status.emit(f"Downloading system {sys_count + 1}…")
             try:
                 sin = proto.send_command(f"SIN,{sys_index}")
@@ -124,7 +135,7 @@ class _DownloadWorker(QThread):
                     first_grp_index = 0
 
                 grp_index = first_grp_index
-                while grp_index > 0 and not self._abort:
+                while grp_index not in (-1, 0) and not self._abort:
                     try:
                         gin = proto.send_command(f"GIN,{grp_index}")
                     except ProtocolError as e:
@@ -151,7 +162,7 @@ class _DownloadWorker(QThread):
                     except ValueError:
                         chan_index = 0
 
-                    while chan_index > 0 and not self._abort:
+                    while chan_index not in (-1, 0) and not self._abort:
                         try:
                             cin = proto.send_command(f"CIN,{chan_index}")
                         except ProtocolError as e:
@@ -198,25 +209,24 @@ class _DownloadWorker(QThread):
                         try:
                             chan_index = int(next_chan_index_str)
                         except ValueError:
-                            chan_index = 0
+                            chan_index = -1
 
                     sys_obj.groups.append(grp_obj)
                     try:
                         grp_index = int(next_grp_index_str)
                     except ValueError:
-                        grp_index = 0
+                        grp_index = -1
 
             config.systems.append(sys_obj)
             sys_count += 1
             self.progress.emit(min(90, sys_count * 10))
 
-            # Advance to next system
-            # Field 15 (0-indexed) is the next system index in some firmware versions
-            next_sys_str = _para(sin, 15)
+            # Advance to next system — field index 12 (0-based) = position 13 (1-based)
+            next_sys_str = _para(sin, 12)
             try:
                 sys_index = int(next_sys_str)
             except ValueError:
-                sys_index = 0
+                sys_index = -1
 
         try:
             proto.exit_program_mode()
