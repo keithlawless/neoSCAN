@@ -301,10 +301,10 @@ class _UploadWorker(QThread):
             self.log_line.emit(f"\nWarning: EPG error: {e}")
 
         # After leaving program mode the scanner may sit on the last channel
-        # it touched.  Send SCAN key to put it into scanning mode.
+        # it touched.  Wait for it to fully exit program mode then send SCAN.
         try:
             import time as _time
-            _time.sleep(0.3)   # brief pause for scanner to finish EPG transition
+            _time.sleep(1.5)   # scanner needs time to finish EPG transition
             proto.send_key("S")
             self.log_line.emit("Sent SCAN key — scanner is now scanning.")
         except ProtocolError:

@@ -169,9 +169,10 @@ class ScannerProtocol:
                 "pri", "sys_name", "grp_name", "ch_name", "sql_code", "mute"]
         return {keys[i]: fields[i] for i in range(min(len(keys), len(fields)))}
 
-    def send_key(self, key: str) -> None:
+    def send_key(self, key: str, mode: str = "P") -> None:
         """
-        Send a virtual keypress to the scanner (remote control).
-        E.g. key='S' for SCAN, 'H' for HOLD, '0'-'9' for number keys.
+        Send a virtual keypress to the scanner.
+        key:  S=SCAN, H=HOLD, L=LOCKOUT, 0-9=number keys, etc.
+        mode: P=Press (default), L=Long Press, H=Hold, R=Release
         """
-        self.send_command("KEY", key)
+        self.send_command("KEY", key, mode)
