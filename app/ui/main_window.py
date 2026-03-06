@@ -440,16 +440,25 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Not Ready", "Connect to the scanner and open a file first.")
             return
         from app.ui.programmer.upload_dialog import UploadDialog
-        dlg = UploadDialog(self._proto, self._config, parent=self)
-        dlg.exec()
+        self._log_panel.pause_polling()
+        try:
+            dlg = UploadDialog(self._proto, self._config, parent=self)
+            dlg.exec()
+        finally:
+            self._log_panel.resume_polling()
 
     def _on_download(self) -> None:
         if not self._conn:
             QMessageBox.warning(self, "Not Connected", "Connect to the scanner first.")
             return
         from app.ui.programmer.download_dialog import DownloadDialog
+        self._log_panel.pause_polling()
         dlg = DownloadDialog(self._proto, parent=self)
-        if dlg.exec() and dlg.downloaded_config:
+        try:
+            result = dlg.exec()
+        finally:
+            self._log_panel.resume_polling()
+        if result and dlg.downloaded_config:
             config = dlg.downloaded_config
             if self._config and self._config.modified:
                 reply = QMessageBox.question(

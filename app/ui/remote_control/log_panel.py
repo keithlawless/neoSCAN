@@ -124,6 +124,15 @@ class LogPanel(QWidget):
 
         self._set_controls(connected=False, logging=False)
 
+    def pause_polling(self) -> None:
+        """Temporarily stop polling (e.g. while program mode is active). Preserves logging state."""
+        self._timer.stop()
+
+    def resume_polling(self) -> None:
+        """Resume polling after a pause, if still connected."""
+        if self._proto:
+            self._timer.start()
+
     def set_protocol(self, proto: ScannerProtocol | None) -> None:
         self._proto = proto
         if proto:
