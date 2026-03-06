@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QCheckBox,
     QGroupBox,
+    QPushButton,
     QScrollArea,
     QSizePolicy,
     QFrame,
@@ -376,13 +377,12 @@ class ChannelEditorPanel(QWidget):
         form.addRow("Group Name:", e_name)
         form.addRow("", _help_label("grp_name"))
 
-        e_qk = QLineEdit(grp.quick_key if grp.quick_key != "." else "")
-        e_qk.setPlaceholderText(". = none, or 0-99")
-        e_qk.setToolTip(HELP["quick_key"])
-        e_qk.textChanged.connect(
-            lambda v: self._set_group_field(s_idx, g_idx, "quick_key", v or ".")
+        qk_row, _ = self._qk_row(
+            grp.quick_key,
+            lambda v: self._set_group_field(s_idx, g_idx, "quick_key", v or "."),
+            self._used_group_qks,
         )
-        form.addRow("Quick Key:", e_qk)
+        form.addRow("Quick Key:", qk_row)
         form.addRow("", _help_label("quick_key"))
 
         cb_lockout = QCheckBox("Locked out (skip this group)")
@@ -424,13 +424,12 @@ class ChannelEditorPanel(QWidget):
         form.addRow("System Type:", c_type)
         form.addRow("", _help_label("sys_type"))
 
-        e_qk = QLineEdit(sys.quick_key if sys.quick_key != "." else "")
-        e_qk.setPlaceholderText(". = none, or 0-99")
-        e_qk.setToolTip(HELP["quick_key"])
-        e_qk.textChanged.connect(
-            lambda v: self._set_system_field(s_idx, "quick_key", v or ".")
+        qk_row, _ = self._qk_row(
+            sys.quick_key,
+            lambda v: self._set_system_field(s_idx, "quick_key", v or "."),
+            self._used_system_qks,
         )
-        form.addRow("Quick Key:", e_qk)
+        form.addRow("Quick Key:", qk_row)
         form.addRow("", _help_label("quick_key"))
 
         e_hold = QLineEdit(sys.hold_time)
@@ -459,6 +458,70 @@ class ChannelEditorPanel(QWidget):
         )
         info.setStyleSheet("color: gray; font-size: 11px; padding: 4px;")
         layout.addWidget(info)
+
+    # ------------------------------------------------------------------
+    # Quick key helpers
+    # ------------------------------------------------------------------
+
+    def _used_system_qks(self) -> set[int]:
+        """Return the set of numeric quick keys already assigned to systems."""
+        used = set()
+        if not self._config:
+            return used
+        for sys in self._config.systems:
+            try:
+                used.add(int(sys.quick_key))
+            except (ValueError, TypeError):
+                pass
+        return used
+
+    def _used_group_qks(self) -> set[int]:
+        """Return the set of numeric quick keys already assigned to any group."""
+        used = set()
+        if not self._config:
+            return used
+        for sys in self._config.systems:
+            for grp in sys.groups:
+                try:
+                    used.add(int(grp.quick_key))
+                except (ValueError, TypeError):
+                    pass
+        return used
+
+    def _next_available_qk(self, used: set[int]) -> str:
+        """Return the lowest quick key 0-99 not in *used*, or '' if all taken."""
+        for k in range(100):
+            if k not in used:
+                return str(k)
+        return ""
+
+    def _qk_row(self, current_qk: str, on_change, used_fn) -> tuple[QWidget, QLineEdit]:
+        """
+        Build a widget containing a QLineEdit for a quick key plus a
+        'Next Available' button.  Returns (row_widget, line_edit).
+        """
+        row = QWidget()
+        hbox = QHBoxLayout(row)
+        hbox.setContentsMargins(0, 0, 0, 0)
+
+        e_qk = QLineEdit(current_qk if current_qk != "." else "")
+        e_qk.setPlaceholderText(". = none, or 0-99")
+        e_qk.setToolTip(HELP["quick_key"])
+        e_qk.textChanged.connect(on_change)
+        hbox.addWidget(e_qk)
+
+        btn = QPushButton("Next Available")
+        btn.setFixedWidth(110)
+        btn.setToolTip("Fill in the lowest quick key (0–99) not already used")
+        btn.clicked.connect(lambda: self._fill_next_qk(e_qk, used_fn()))
+        hbox.addWidget(btn)
+
+        return row, e_qk
+
+    def _fill_next_qk(self, field: QLineEdit, used: set[int]) -> None:
+        nxt = self._next_available_qk(used)
+        if nxt:
+            field.setText(nxt)
 
     # ------------------------------------------------------------------
     # Model write-back helpers
