@@ -95,6 +95,16 @@ class _UploadWorker(QThread):
             self.status.emit(f"Uploading system: {sys.name}")
             self.log_line.emit(f"\n[System] {sys.name} ({sys.type_name})")
 
+            # Trunked systems (Motorola, EDACS, P25, LTR) require trunk frequencies
+            # and talk groups that are not yet supported. Skip them entirely rather
+            # than creating an empty system slot that confuses the scanner.
+            if not sys.is_conventional:
+                self.log_line.emit(
+                    f"  Skipped — trunked system upload not yet supported. "
+                    "Add trunk frequencies and talk groups manually on the scanner."
+                )
+                continue
+
             # CSY uses a different (simpler) type code than SIN.
             csy_type = internal_to_csy_type(sys.system_type)
 
@@ -134,12 +144,6 @@ class _UploadWorker(QThread):
 
             done += 1
             self.progress.emit(int(done / total_steps * 100))
-
-            if not sys.is_conventional:
-                self.log_line.emit(
-                    f"  Note: {sys.type_name} system — trunked channel upload is "
-                    "not yet supported. System slot created but channels skipped."
-                )
 
             if sys.is_conventional:
                 for grp in sys.groups:
@@ -240,6 +244,18 @@ class _UploadWorker(QThread):
             self.log_line.emit("\nExited program mode.")
         except ProtocolError as e:
             self.log_line.emit(f"\nWarning: EPG error: {e}")
+
+        # After leaving program mode the scanner may sit on the last channel
+        # it touched.  Send SCAN key to put it into scanning mode.
+        try:
+            import time as _time
+            _time.sleep(0.3)   # brief pause for scanner to finish EPG transition
+            proto.send_key("S")
+            self.log_line.emit("Sent SCAN key — scanner is now scanning.")
+        except ProtocolError:
+            self.log_line.emit(
+                "Note: Could not send SCAN key. Press SCAN on the scanner to start."
+            )
 
         self.progress.emit(100)
         self.finished_ok.emit(sys_count, ch_count)
