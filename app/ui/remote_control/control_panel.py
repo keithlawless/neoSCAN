@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import logging
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter
 from PyQt6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -22,6 +22,90 @@ from PyQt6.QtWidgets import (
 from app.serial.protocol import ScannerProtocol, ProtocolError
 
 log = logging.getLogger(__name__)
+
+_BG = "#1a1a1a"
+_FG = "#88ff88"
+_SCROLL_STEP_PX = 2    # pixels per tick
+_SCROLL_INTERVAL_MS = 40  # ~25 fps
+_HOLD_MS = 5000        # pause at end before restarting
+
+
+class _ScrollingLabel(QWidget):
+    """
+    Single-line display that scrolls text horizontally when it overflows.
+    Scrolls to the end, holds for _HOLD_MS, then restarts.
+    """
+
+    def __init__(self, font: QFont, parent=None) -> None:
+        super().__init__(parent)
+        self.setFont(font)
+        self.setMinimumHeight(QFontMetrics(font).height() + 10)
+        self._text = ""
+        self._offset = 0
+
+        self._scroll_timer = QTimer(self)
+        self._scroll_timer.setInterval(_SCROLL_INTERVAL_MS)
+        self._scroll_timer.timeout.connect(self._tick)
+
+        self._hold_timer = QTimer(self)
+        self._hold_timer.setSingleShot(True)
+        self._hold_timer.setInterval(_HOLD_MS)
+        self._hold_timer.timeout.connect(self._restart)
+
+    def setText(self, text: str) -> None:
+        if text == self._text:
+            return
+        self._text = text
+        self._offset = 0
+        self._scroll_timer.stop()
+        self._hold_timer.stop()
+        self.update()
+        self._maybe_start_scroll()
+
+    def _text_width(self) -> int:
+        return QFontMetrics(self.font()).horizontalAdvance(self._text)
+
+    def _max_offset(self) -> int:
+        return max(0, self._text_width() - self.width() + 8)
+
+    def _maybe_start_scroll(self) -> None:
+        if self._max_offset() > 0:
+            self._scroll_timer.start()
+
+    def _tick(self) -> None:
+        self._offset = min(self._offset + _SCROLL_STEP_PX, self._max_offset())
+        self.update()
+        if self._offset >= self._max_offset():
+            self._scroll_timer.stop()
+            self._hold_timer.start()
+
+    def _restart(self) -> None:
+        self._offset = 0
+        self.update()
+        self._maybe_start_scroll()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        # Re-evaluate scroll need after resize; reset to start
+        if not self._scroll_timer.isActive() and not self._hold_timer.isActive():
+            self._offset = 0
+            self._maybe_start_scroll()
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(_BG))
+        p.setFont(self.font())
+        p.setPen(QColor(_FG))
+        p.setClipRect(self.rect())
+        fm = QFontMetrics(self.font())
+        y = (self.height() + fm.ascent() - fm.descent()) // 2
+        p.drawText(4 - self._offset, y, self._text)
+        p.end()
+
+    def sizeHint(self) -> QSize:
+        fm = QFontMetrics(self.font())
+        return QSize(200, fm.height() + 10)
+
 
 # Key definitions: (label_on_button, key_code_sent_to_scanner)
 KEYPAD = [
@@ -73,14 +157,9 @@ class ControlPanel(QWidget):
             "background: #1a1a1a; color: #00ff00; padding: 6px; border-radius: 4px;"
         )
 
-        self._display_bottom = QLabel("")
-        self._display_bottom.setAlignment(Qt.AlignmentFlag.AlignCenter)
         small_mono = QFont("Courier")
         small_mono.setPointSize(10)
-        self._display_bottom.setFont(small_mono)
-        self._display_bottom.setStyleSheet(
-            "background: #1a1a1a; color: #88ff88; padding: 4px; border-radius: 4px;"
-        )
+        self._display_bottom = _ScrollingLabel(small_mono)
 
         display_layout.addWidget(self._display_top)
         display_layout.addWidget(self._display_bottom)
