@@ -100,6 +100,24 @@ HELP = {
         "setting. Range: -3 to +3. Use positive values for quiet channels, "
         "negative for loud ones."
     ),
+    "output": (
+        "Record Output\n\n"
+        "When checked, this channel's audio is routed to the scanner's "
+        "REC (line-level) output jack on the back of the unit.\n\n"
+        "Enable this on any channel you want captured by NeoSCAN's audio "
+        "transcription feature or an external recorder. Channels with this "
+        "unchecked will not produce audio on the record port."
+    ),
+    "sys_record_mode": (
+        "Record Mode\n\n"
+        "Controls which channels send audio to the scanner's RECORD OUT jack:\n"
+        "• Off — no audio is sent to the RECORD OUT jack for this system\n"
+        "• Marked — only channels with 'Record Output' enabled send audio\n"
+        "• All — every channel in this system sends audio to RECORD OUT\n\n"
+        "This system-level setting must be 'Marked' or 'All' for any channel-level "
+        "recording to work. If this is set to 'Off', no audio reaches the jack "
+        "regardless of channel settings."
+    ),
     "sys_name": (
         "System Name\n\n"
         "Up to 16 characters displayed when this system is active. "
@@ -334,6 +352,17 @@ class ChannelEditorPanel(QWidget):
             )
             flags_layout.addWidget(cb)
             flags_layout.addWidget(_help_label(help_key))
+
+        # Record output — stored as "ON"/"OFF" string in the model
+        cb_record = QCheckBox("Record Output (send audio to REC jack)")
+        cb_record.setChecked(ch.output == "ON")
+        cb_record.setToolTip(HELP["output"])
+        cb_record.toggled.connect(
+            lambda v: self._set_channel_field(s_idx, g_idx, c_idx, "output", "ON" if v else "OFF")
+        )
+        flags_layout.addWidget(cb_record)
+        flags_layout.addWidget(_help_label("output"))
+
         layout.addWidget(flags_group)
 
     def _build_talkgroup_form(
@@ -450,6 +479,19 @@ class ChannelEditorPanel(QWidget):
         cb_lockout.setChecked(sys.lockout)
         cb_lockout.toggled.connect(lambda v: self._set_system_field(s_idx, "lockout", v))
         form.addRow("", cb_lockout)
+
+        c_rec = QComboBox()
+        c_rec.addItem("Off (no recording)", userData="0")
+        c_rec.addItem("Marked channels only", userData="1")
+        c_rec.addItem("All channels", userData="2")
+        cur_rec = c_rec.findData(sys.record_mode or "0")
+        c_rec.setCurrentIndex(cur_rec if cur_rec >= 0 else 0)
+        c_rec.setToolTip(HELP["sys_record_mode"])
+        c_rec.currentIndexChanged.connect(
+            lambda _: self._set_system_field(s_idx, "record_mode", c_rec.currentData())
+        )
+        form.addRow("Record Mode:", c_rec)
+        form.addRow("", _help_label("sys_record_mode"))
 
         layout.addWidget(group)
 

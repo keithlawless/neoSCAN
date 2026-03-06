@@ -38,7 +38,8 @@ COL_FREQ = 3
 COL_SYS = 4
 COL_GRP = 5
 COL_MOD = 6
-HEADERS = ["Time", "Duration", "Channel", "Frequency", "System", "Group", "Mod"]
+COL_TRANSCRIPT = 7
+HEADERS = ["Time", "Duration", "Channel", "Frequency", "System", "Group", "Mod", "Transcript"]
 
 
 class _TransmissionEntry:
@@ -50,6 +51,8 @@ class _TransmissionEntry:
         self.system = info.get("sys_name", "")
         self.group = info.get("grp_name", "")
         self.modulation = info.get("mod", "")
+        self.transcript: str = ""
+        self.transcript_pending: bool = False
 
     @property
     def duration(self) -> str:
@@ -84,6 +87,7 @@ class LogPanel(QWidget):
         self._entries: list[_TransmissionEntry] = []
         self._active: Optional[_TransmissionEntry] = None
         self._last_info: Optional[dict] = None
+        self._transcription_manager = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -116,7 +120,7 @@ class LogPanel(QWidget):
         self._table = QTableWidget(0, len(HEADERS))
         self._table.setHorizontalHeaderLabels(HEADERS)
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        self._table.horizontalHeader().setSectionResizeMode(COL_CH_NAME, QHeaderView.ResizeMode.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(COL_TRANSCRIPT, QHeaderView.ResizeMode.Stretch)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setAlternatingRowColors(True)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -145,6 +149,21 @@ class LogPanel(QWidget):
                 self._refresh_row(len(self._entries) - 1)
                 self._active = None
         self._set_controls(connected=proto is not None, logging=self._logging)
+
+    def set_transcription_manager(self, manager) -> None:
+        """Wire up the TranscriptionManager. Call once from MainWindow after creation."""
+        self._transcription_manager = manager
+        manager.transcription_ready.connect(self._on_transcription_ready)
+
+    def _on_transcription_ready(self, row_index: int, text: str, job) -> None:
+        if row_index < 0 or row_index >= len(self._entries):
+            return
+        entry = self._entries[row_index]
+        entry.transcript = text
+        entry.transcript_pending = False
+        self._refresh_row(row_index)
+        if self._transcription_manager:
+            self._transcription_manager.on_transcription_done(row_index, text, job)
 
     def _set_controls(self, connected: bool, logging: bool) -> None:
         self._start_btn.setEnabled(connected and not logging)
@@ -194,6 +213,8 @@ class LogPanel(QWidget):
                     self._active = entry
                     self._add_table_row(entry)
                     self._set_controls(connected=True, logging=True)
+                    if self._transcription_manager:
+                        self._transcription_manager.on_transmission_started()
                 else:
                     # Ongoing transmission — update duration in place
                     self._refresh_row(len(self._entries) - 1)
@@ -201,7 +222,12 @@ class LogPanel(QWidget):
             if self._logging and self._active is not None:
                 # Transmission ended
                 self._active.end_time = datetime.now()
-                self._refresh_row(len(self._entries) - 1)
+                row_index = len(self._entries) - 1
+                if self._transcription_manager:
+                    self._active.transcript_pending = True
+                self._refresh_row(row_index)
+                if self._transcription_manager:
+                    self._transcription_manager.on_transmission_ended(row_index, self._active)
                 self._active = None
 
     def _add_table_row(self, entry: _TransmissionEntry) -> None:
@@ -229,6 +255,16 @@ class LogPanel(QWidget):
         self._table.setItem(row, COL_SYS, _cell(entry.system))
         self._table.setItem(row, COL_GRP, _cell(entry.group))
         self._table.setItem(row, COL_MOD, _cell(entry.modulation))
+        if entry.transcript_pending:
+            tx_text = "transcribing\u2026"
+        elif entry.transcript:
+            tx_text = entry.transcript
+        elif entry.end_time is not None:
+            # Transcription finished but returned no speech
+            tx_text = "(no speech)"
+        else:
+            tx_text = ""
+        self._table.setItem(row, COL_TRANSCRIPT, _cell(tx_text))
 
     def _export_csv(self) -> None:
         if not self._entries:
@@ -243,7 +279,7 @@ class LogPanel(QWidget):
                 writer = csv.writer(f)
                 writer.writerow([
                     "Time", "End Time", "Duration (s)", "Channel",
-                    "Frequency", "System", "Group", "Modulation"
+                    "Frequency", "System", "Group", "Modulation", "Transcript"
                 ])
                 for e in self._entries:
                     end_str = e.end_time.strftime("%H:%M:%S") if e.end_time else ""
@@ -257,6 +293,7 @@ class LogPanel(QWidget):
                         end_str, f"{dur:.1f}",
                         e.channel, e.freq_display(),
                         e.system, e.group, e.modulation,
+                        e.transcript,
                     ])
             QMessageBox.information(self, "Export Complete", f"Log exported to {path}")
         except Exception as exc:

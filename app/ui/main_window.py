@@ -30,6 +30,7 @@ from app.ui.editor.channel_editor import ChannelEditorPanel
 from app.ui.editor.csv_import_dialog import CSVImportDialog
 from app.ui.remote_control.control_panel import ControlPanel
 from app.ui.remote_control.log_panel import LogPanel
+from app.audio.transcriber import TranscriptionManager
 from app.data import file_996
 from app.data.models import ScannerConfig
 
@@ -71,12 +72,14 @@ class MainWindow(QMainWindow):
         self._current_port: str | None = None
         self._connect_worker: _ConnectWorker | None = None
         self._config: ScannerConfig | None = None
+        self._transcription_manager = TranscriptionManager(parent=self)
 
         self._build_menu()
         self._build_central()
         self._build_status_bar()
         self._update_connection_ui()
         self._update_title()
+        self._transcription_manager.apply_settings()
 
     # ------------------------------------------------------------------
     # Menu
@@ -208,6 +211,7 @@ class MainWindow(QMainWindow):
 
         self._log_panel = LogPanel()
         self._log_panel.channel_info_updated.connect(self._control_panel.update_display)
+        self._log_panel.set_transcription_manager(self._transcription_manager)
 
         rc_splitter.addWidget(self._control_panel)
         rc_splitter.addWidget(self._log_panel)
@@ -505,7 +509,8 @@ class MainWindow(QMainWindow):
 
     def _on_preferences(self) -> None:
         dlg = PreferencesDialog(parent=self)
-        dlg.exec()
+        if dlg.exec():
+            self._transcription_manager.apply_settings()
 
     def _on_about(self) -> None:
         from pathlib import Path
@@ -534,5 +539,6 @@ class MainWindow(QMainWindow):
             if reply != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
+        self._transcription_manager.shutdown()
         port_manager.close_port(self._conn)
         super().closeEvent(event)

@@ -17,6 +17,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QFileDialog,
     QHBoxLayout,
+    QScrollArea,
+    QWidget,
 )
 
 from app.serial.port_manager import list_ports
@@ -34,7 +36,7 @@ class PreferencesDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Preferences")
-        self.setMinimumWidth(440)
+        self.setMinimumWidth(480)
         self._settings = load_prefs()
         self._build_ui()
         self._load_values()
@@ -92,6 +94,50 @@ class PreferencesDialog(QDialog):
 
         layout.addWidget(appearance_box)
 
+        # --- Transcription ---
+        tx_box = QGroupBox("Transcription")
+        tx_form = QFormLayout(tx_box)
+
+        self._tx_enable = QCheckBox("Enable audio transcription (requires openai-whisper)")
+        self._tx_enable.stateChanged.connect(self._on_tx_enable_changed)
+        tx_form.addRow("", self._tx_enable)
+
+        # Audio input device
+        device_row = QHBoxLayout()
+        self._tx_device_combo = QComboBox()
+        self._tx_device_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self._tx_device_combo.setMinimumWidth(200)
+        tx_refresh_btn = QPushButton("Refresh")
+        tx_refresh_btn.setFixedWidth(70)
+        tx_refresh_btn.clicked.connect(self._refresh_audio_devices)
+        device_row.addWidget(self._tx_device_combo, 1)
+        device_row.addWidget(tx_refresh_btn)
+        self._tx_device_label = QLabel("Audio input device:")
+        tx_form.addRow(self._tx_device_label, device_row)
+        self._refresh_audio_devices()
+
+        # Whisper model size
+        self._tx_model_combo = QComboBox()
+        self._tx_model_combo.addItems(["tiny", "base", "small", "medium", "large"])
+        self._tx_model_label = QLabel("Whisper model:")
+        tx_form.addRow(self._tx_model_label, self._tx_model_combo)
+
+        # Transcript directory
+        tx_dir_row = QHBoxLayout()
+        self._tx_dir_edit = QLineEdit()
+        self._tx_dir_edit.setPlaceholderText(
+            str(__import__("pathlib").Path.home() / "Documents" / "NeoSCAN" / "Transcripts")
+        )
+        tx_browse_btn = QPushButton("Browse…")
+        tx_browse_btn.setFixedWidth(70)
+        tx_browse_btn.clicked.connect(self._browse_transcript_dir)
+        tx_dir_row.addWidget(self._tx_dir_edit, 1)
+        tx_dir_row.addWidget(tx_browse_btn)
+        self._tx_dir_label = QLabel("Transcript directory:")
+        tx_form.addRow(self._tx_dir_label, tx_dir_row)
+
+        layout.addWidget(tx_box)
+
         # --- Buttons ---
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -122,6 +168,41 @@ class PreferencesDialog(QDialog):
         if directory:
             self._log_path_edit.setText(directory)
 
+    def _refresh_audio_devices(self) -> None:
+        """Populate the audio input device combo from sounddevice."""
+        current_data = self._tx_device_combo.currentData()
+        self._tx_device_combo.clear()
+        self._tx_device_combo.addItem("(none)", None)
+        try:
+            import sounddevice as sd
+            devices = sd.query_devices()
+            for i, dev in enumerate(devices):
+                if dev["max_input_channels"] > 0:
+                    self._tx_device_combo.addItem(f"{i}: {dev['name']}", i)
+        except Exception:
+            self._tx_device_combo.addItem("(sounddevice not available)", None)
+        # Restore previous selection
+        for idx in range(self._tx_device_combo.count()):
+            if self._tx_device_combo.itemData(idx) == current_data:
+                self._tx_device_combo.setCurrentIndex(idx)
+                break
+
+    def _browse_transcript_dir(self) -> None:
+        directory = QFileDialog.getExistingDirectory(
+            self, "Select transcript directory", self._tx_dir_edit.text()
+        )
+        if directory:
+            self._tx_dir_edit.setText(directory)
+
+    def _on_tx_enable_changed(self, state: int) -> None:
+        enabled = bool(state)
+        for w in (
+            self._tx_device_label, self._tx_device_combo,
+            self._tx_model_label, self._tx_model_combo,
+            self._tx_dir_label, self._tx_dir_edit,
+        ):
+            w.setEnabled(enabled)
+
     # ------------------------------------------------------------------
     # Load / Save
     # ------------------------------------------------------------------
@@ -145,10 +226,44 @@ class PreferencesDialog(QDialog):
         if idx >= 0:
             self._theme_combo.setCurrentIndex(idx)
 
+        # Transcription
+        tx_enabled = self._settings.value("transcription/enabled", False, type=bool)
+        self._tx_enable.setChecked(tx_enabled)
+        # _on_tx_enable_changed fires from setChecked, but call explicitly in case state=0 (unchecked)
+        self._on_tx_enable_changed(tx_enabled)
+
+        saved_device = self._settings.value("transcription/device_index", None)
+        if saved_device is not None:
+            try:
+                saved_device = int(saved_device)
+            except (ValueError, TypeError):
+                saved_device = None
+        for i in range(self._tx_device_combo.count()):
+            if self._tx_device_combo.itemData(i) == saved_device:
+                self._tx_device_combo.setCurrentIndex(i)
+                break
+
+        model_size = self._settings.value("transcription/model_size", "base")
+        idx = self._tx_model_combo.findText(model_size)
+        if idx >= 0:
+            self._tx_model_combo.setCurrentIndex(idx)
+
+        tx_dir = self._settings.value("transcription/transcript_dir", "")
+        self._tx_dir_edit.setText(tx_dir)
+
     def _save_and_accept(self) -> None:
         self._settings.setValue("serial/default_port", self._port_combo.currentText())
         self._settings.setValue("serial/auto_connect", self._auto_connect.isChecked())
         self._settings.setValue("log/save_dir", self._log_path_edit.text())
         self._settings.setValue("appearance/theme", self._theme_combo.currentText())
+
+        # Transcription
+        self._settings.setValue("transcription/enabled", self._tx_enable.isChecked())
+        self._settings.setValue("transcription/device_index",
+                                self._tx_device_combo.currentData())
+        self._settings.setValue("transcription/model_size",
+                                self._tx_model_combo.currentText())
+        self._settings.setValue("transcription/transcript_dir", self._tx_dir_edit.text())
+
         self._settings.sync()
         self.accept()

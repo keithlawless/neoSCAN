@@ -1,0 +1,276 @@
+"""
+Transcription pipeline for NeoSCAN.
+
+TranscriptionManager  — owned by MainWindow; bridges the log panel, recorder,
+                         worker thread, and transcript writer.
+TranscriberWorker     — QThread that processes transcription jobs serially.
+_ModelLoaderThread    — QThread that loads the Whisper model in the background.
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Optional
+
+import numpy as np
+from PyQt6.QtCore import (
+    QMutex,
+    QMutexLocker,
+    QObject,
+    QThread,
+    QWaitCondition,
+    pyqtSignal,
+    pyqtSlot,
+)
+
+from app.audio.recorder import AudioRecorder
+from app.audio.transcript_writer import TranscriptWriter
+from app.ui.settings.preferences_dialog import load_prefs
+
+log = logging.getLogger(__name__)
+
+_DEFAULT_MODEL = "base"
+
+
+@dataclass
+class _TranscriptionJob:
+    audio: np.ndarray
+    row_index: int
+    entry_start_iso: str
+    channel: str
+    frequency: str
+    system: str
+    group: str
+
+
+class _ModelLoaderThread(QThread):
+    model_loaded = pyqtSignal(object)
+    load_failed = pyqtSignal(str)
+
+    def __init__(self, model_size: str, parent=None) -> None:
+        super().__init__(parent)
+        self._model_size = model_size
+
+    def run(self) -> None:
+        try:
+            import whisper  # deferred — optional dependency
+            log.info("Loading Whisper model '%s'…", self._model_size)
+            model = whisper.load_model(self._model_size)
+            log.info("Whisper model '%s' loaded", self._model_size)
+            self.model_loaded.emit(model)
+        except Exception as exc:
+            log.error("Failed to load Whisper model: %s", exc)
+            self.load_failed.emit(str(exc))
+
+
+class TranscriberWorker(QThread):
+    """
+    Processes transcription jobs serially on a background thread.
+
+    Signals:
+        transcription_ready(row_index, text, job)
+    """
+
+    transcription_ready = pyqtSignal(int, str, object)
+
+    def __init__(self, model, parent=None) -> None:
+        super().__init__(parent)
+        self._model = model
+        self._queue: list[_TranscriptionJob] = []
+        self._mutex = QMutex()
+        self._cond = QWaitCondition()
+        self._running = True
+
+    def enqueue(self, job: _TranscriptionJob) -> None:
+        with QMutexLocker(self._mutex):
+            self._queue.append(job)
+            self._cond.wakeOne()
+
+    def stop(self) -> None:
+        with QMutexLocker(self._mutex):
+            self._running = False
+            self._cond.wakeOne()
+
+    def run(self) -> None:
+        while True:
+            self._mutex.lock()
+            while self._running and not self._queue:
+                self._cond.wait(self._mutex)
+            if not self._running and not self._queue:
+                self._mutex.unlock()
+                break
+            job = self._queue.pop(0)
+            self._mutex.unlock()
+
+            self._process(job)
+
+    def _process(self, job: _TranscriptionJob) -> None:
+        duration = len(job.audio) / 16000
+        try:
+            log.info("Transcribing row %d (%.1fs of audio from device)…",
+                     job.row_index, duration)
+            result = self._model.transcribe(
+                job.audio,
+                fp16=False,
+                language="en",
+            )
+            text = result.get("text", "").strip()
+            if text:
+                log.info("Transcription row %d: %r", job.row_index, text[:80])
+            else:
+                log.warning(
+                    "Transcription row %d: Whisper returned empty text for %.1fs of "
+                    "audio — check that the scanner audio cable is connected to the "
+                    "selected input device and the volume is adequate.",
+                    job.row_index, duration,
+                )
+            self.transcription_ready.emit(job.row_index, text, job)
+        except Exception as exc:
+            log.error("Transcription failed for row %d: %s", job.row_index, exc)
+            self.transcription_ready.emit(job.row_index, f"[error: {exc}]", job)
+
+
+class TranscriptionManager(QObject):
+    """
+    Coordinates audio recording, Whisper transcription, and file writing.
+    Owned by MainWindow. Call apply_settings() on startup and after Prefs.
+
+    transcription_ready signal is forwarded from the worker so LogPanel can
+    connect to it directly.
+    """
+
+    transcription_ready = pyqtSignal(int, str, object)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._recorder = AudioRecorder()
+        self._writer = TranscriptWriter()
+        self._worker: Optional[TranscriberWorker] = None
+        self._loader: Optional[_ModelLoaderThread] = None
+        self._model = None
+        self._enabled = False
+        self._current_model_size = ""
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def apply_settings(self) -> None:
+        """Read QSettings and (re)configure recorder, writer, and model."""
+        settings = load_prefs()
+        self._enabled = settings.value("transcription/enabled", False, type=bool)
+
+        device_index = settings.value("transcription/device_index", None)
+        if device_index is not None:
+            try:
+                device_index = int(device_index)
+            except (ValueError, TypeError):
+                device_index = None
+        self._recorder.set_device(device_index)
+
+        transcript_dir = settings.value("transcription/transcript_dir", "")
+        self._writer.set_directory(transcript_dir)
+
+        model_size = settings.value("transcription/model_size", _DEFAULT_MODEL)
+        if self._enabled and model_size != self._current_model_size:
+            self._load_model(model_size)
+
+        if not self._enabled:
+            # Keep model in memory if already loaded — just don't use it
+            log.debug("TranscriptionManager: transcription disabled")
+
+    def on_transmission_started(self) -> None:
+        if not self._enabled:
+            return
+        self._recorder.start_recording()
+
+    def on_transmission_ended(self, row_index: int, entry) -> None:
+        """
+        Called when a transmission ends. Stops recording and enqueues a job.
+        `entry` is a _TransmissionEntry from log_panel.
+        """
+        if not self._enabled:
+            return
+        audio = self._recorder.stop_recording()
+        if audio is None:
+            log.debug("TranscriptionManager: no audio captured for row %d", row_index)
+            return
+        if self._worker is None or self._model is None:
+            log.warning("TranscriptionManager: model not ready — dropping job for row %d",
+                        row_index)
+            return
+        job = _TranscriptionJob(
+            audio=audio,
+            row_index=row_index,
+            entry_start_iso=entry.start_time.isoformat(),
+            channel=entry.channel,
+            frequency=entry.frequency,
+            system=entry.system,
+            group=entry.group,
+        )
+        self._worker.enqueue(job)
+
+    def on_transcription_done(self, row_index: int, text: str, job: _TranscriptionJob) -> None:
+        """Called by LogPanel after it has updated the table row."""
+        self._writer.append(
+            start_iso=job.entry_start_iso,
+            channel=job.channel,
+            frequency=job.frequency,
+            system=job.system,
+            group=job.group,
+            text=text,
+        )
+
+    def shutdown(self) -> None:
+        """Stop all background threads cleanly."""
+        self._recorder.stop_recording()
+        if self._worker:
+            self._worker.stop()
+            self._worker.wait(3000)
+            self._worker = None
+        if self._loader:
+            self._loader.wait(3000)
+            self._loader = None
+
+    # ------------------------------------------------------------------
+    # Private
+    # ------------------------------------------------------------------
+
+    def _load_model(self, model_size: str) -> None:
+        # Shut down existing worker before replacing model
+        if self._worker:
+            self._worker.stop()
+            self._worker.wait(3000)
+            self._worker = None
+
+        self._current_model_size = model_size
+
+        if self._loader:
+            self._loader.wait(3000)
+
+        self._loader = _ModelLoaderThread(model_size, parent=self)
+        self._loader.model_loaded.connect(self._on_model_loaded)
+        self._loader.load_failed.connect(self._on_model_load_failed)
+        self._loader.finished.connect(self._loader.deleteLater)
+        self._loader.start()
+
+    def _on_model_loaded(self, model) -> None:
+        self._model = model
+        self._loader = None
+        self._worker = TranscriberWorker(model, parent=self)
+        # Use an explicit slot (not signal-to-signal) so Qt's auto-connection
+        # correctly marshals the call to the main thread via a queued connection.
+        self._worker.transcription_ready.connect(self._on_worker_transcription_ready)
+        self._worker.start()
+        log.info("TranscriptionManager: worker started with model '%s'",
+                 self._current_model_size)
+
+    @pyqtSlot(int, str, object)
+    def _on_worker_transcription_ready(self, row_index: int, text: str, job) -> None:
+        """Relay worker result to main thread, then re-emit for LogPanel."""
+        self.transcription_ready.emit(row_index, text, job)
+
+    def _on_model_load_failed(self, error: str) -> None:
+        self._loader = None
+        log.error("TranscriptionManager: model load failed — %s", error)

@@ -141,6 +141,7 @@ class _DownloadWorker(QThread):
             sys_obj.group_id = uuid.uuid4().hex[:16].upper()
             sys_obj.apco_mode = _para(sin, 9) or "AUTO"
             sys_obj.apco_threshold = _para(sin, 10) or "8"
+            sys_obj.record_mode = _para(sin, 17) or "0"
 
             if sys_obj.is_conventional:
                 try:
@@ -195,7 +196,8 @@ class _DownloadWorker(QThread):
                         ch_att = _para(cin, 7)
                         ch_alert = _para(cin, 8)
                         ch_alert_lvl = _para(cin, 9)
-                        next_chan_index_str = _para(cin, 11)
+                        next_chan_index_str = _para(cin, 11)   # FWD_INDEX
+                        ch_record = _para(cin, 14)             # RECORD (after 4 index fields)
 
                         try:
                             freq_mhz = float(ch_freq_raw) / 10000.0
@@ -214,6 +216,7 @@ class _DownloadWorker(QThread):
                         ch_obj.attenuator = ch_att == "1"
                         ch_obj.alert_tone = ch_alert
                         ch_obj.alert_level = ch_alert_lvl
+                        ch_obj.output = "ON" if ch_record == "1" else "OFF"
                         ch_obj.group_id = grp_obj.group_id
                         grp_obj.channels.append(ch_obj)
 

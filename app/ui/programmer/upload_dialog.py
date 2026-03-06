@@ -85,13 +85,30 @@ class _UploadWorker(QThread):
         The solution: CLR first (which clears user channels AND puts factory
         defaults back into the normal linked list), then walk that list with
         DSY to delete every system including the factory ones.
+
+        CLR must be sent OUTSIDE program mode, so we exit PRG, send CLR,
+        then re-enter PRG before the DSY loop.
         """
+        self.log_line.emit("  Exiting program mode to send CLR…")
+        try:
+            proto.exit_program_mode()
+        except ProtocolError as e:
+            self.log_line.emit(f"  Warning: EPG before CLR failed: {e}")
+
+        import time as _time
+        _time.sleep(0.5)   # give scanner time to fully exit PRG
+
         self.log_line.emit("  Sending CLR to reset scanner to factory state…")
         try:
             proto.send_command("CLR")
             self.log_line.emit("  CLR complete.")
         except ProtocolError as e:
             self.log_line.emit(f"  Warning: CLR failed: {e} — continuing with DSY only.")
+
+        _time.sleep(0.5)   # give scanner time to process CLR
+
+        self.log_line.emit("  Re-entering program mode…")
+        proto.enter_program_mode()
 
         try:
             first = proto.send_command("SIH")
@@ -101,7 +118,7 @@ class _UploadWorker(QThread):
 
         deleted = 0
         seen = set()  # guard against corrupt linked lists
-        while sys_index not in (-1, 0) and sys_index not in seen:
+        while sys_index != -1 and sys_index not in seen:
             seen.add(sys_index)
             # Read next pointer BEFORE deleting (DSY removes the node)
             try:
@@ -221,7 +238,7 @@ class _UploadWorker(QThread):
                 f"SIN,{sys_index},{name},{qk},{hld},{lout},{dly},"
                 f",,,,,"    # pos 7-11: RSV (5 empty)
                 f".,"       # pos 12: START_KEY ("." = none)
-                f"0,"       # pos 13: RECORD (0 = off)
+                f"{sys.record_mode or '0'},"  # pos 13: RECORD (0=off,1=marked,2=all)
                 f",,,,"     # pos 14-17: RSV (4 empty)
                 f"00,"      # pos 18: STATE ("00" = no state)
                 f"NONE,,,"  # pos 19: NUMBER_TAG; 20-22: trailing empty
@@ -306,13 +323,14 @@ class _UploadWorker(QThread):
                         alt = ch.alert_tone or "0"
                         altl = ch.alert_level or "0"
                         ch_name = "".join(c for c in (ch.name or "").strip() if c in _safe)[:16].strip()
+                        record = 1 if ch.output == "ON" else 0
                         try:
                             proto.send_command(
                                 f"CIN,{ch_index},{ch_name},{freq_int},{mod},"
                                 f"{tone},{1 if ch.tone_lockout else 0},"
                                 f"{1 if ch.lockout else 0},{1 if ch.priority else 0},"
                                 f"{1 if ch.attenuator else 0},{alt},{altl},"
-                                f"0,0,0,NONE,OFF,0,0"  # RECORD,AUDIO_TYPE,P25NAC,NUMBER_TAG,ALT_COLOR,ALT_PATTERN,VOL_OFFSET
+                                f"{record},0,0,NONE,OFF,0,0"  # RECORD,AUDIO_TYPE,P25NAC,NUMBER_TAG,ALT_COLOR,ALT_PATTERN,VOL_OFFSET
                             )
                             self.log_line.emit(
                                 f"    {ch_name}  {freq_raw:.4f} MHz  {mod}"
