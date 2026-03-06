@@ -195,7 +195,12 @@ class _UploadWorker(QThread):
             #   [RSV]*5,[START_KEY],[RECORD],[RSV]*5,[NUMBER_TAG],
             #   [AGC_ANALOG],[AGC_DIGITAL],[P25WAITING]
             # Sanitise fields — any format error causes SIN to abort silently.
-            name = (sys.name or "").strip()[:16]
+            # Strip characters invalid in scanner names: commas break the protocol;
+            # parentheses and other special chars may cause ERR responses.
+            _safe = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                        "0123456789 -_/&.'!")
+            raw_name = (sys.name or "").strip()
+            name = "".join(c for c in raw_name if c in _safe)[:16].strip()
             qk = (sys.quick_key or ".").strip() or "."
             try:
                 hld = str(max(0, min(255, int(sys.hold_time or 2))))
@@ -245,9 +250,10 @@ class _UploadWorker(QThread):
                     #   [LATITUDE],[LONGITUDE],[RANGE],[GPS_ENABLE]
                     grp_qk = grp.quick_key or "."
                     grp_lout = 1 if grp.lockout else 0
+                    grp_name = "".join(c for c in (grp.name or "").strip() if c in _safe)[:16].strip()
                     try:
                         proto.send_command(
-                            f"GIN,{grp_index},{grp.name},"
+                            f"GIN,{grp_index},{grp_name},"
                             f"{grp_qk},{grp_lout},,,,"  # trailing empty geo fields
                         )
                     except ProtocolError as e:
@@ -292,16 +298,17 @@ class _UploadWorker(QThread):
                         tone = ch.tone or "0"
                         alt = ch.alert_tone or "0"
                         altl = ch.alert_level or "0"
+                        ch_name = "".join(c for c in (ch.name or "").strip() if c in _safe)[:16].strip()
                         try:
                             proto.send_command(
-                                f"CIN,{ch_index},{ch.name},{freq_int},{mod},"
+                                f"CIN,{ch_index},{ch_name},{freq_int},{mod},"
                                 f"{tone},{1 if ch.tone_lockout else 0},"
                                 f"{1 if ch.lockout else 0},{1 if ch.priority else 0},"
                                 f"{1 if ch.attenuator else 0},{alt},{altl},"
                                 f"0,0,0,NONE,OFF,0,0"  # RECORD,AUDIO_TYPE,P25NAC,NUMBER_TAG,ALT_COLOR,ALT_PATTERN,VOL_OFFSET
                             )
                             self.log_line.emit(
-                                f"    {ch.name}  {freq_raw:.4f} MHz  {mod}"
+                                f"    {ch_name}  {freq_raw:.4f} MHz  {mod}"
                             )
                             ch_count += 1
                         except ProtocolError as e:
