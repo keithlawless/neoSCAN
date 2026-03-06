@@ -214,10 +214,18 @@ class _UploadWorker(QThread):
             except ValueError:
                 dly = "2"
             lout = 1 if sys.lockout else 0
-            # BCT15X uses a shorter SIN format than BCD996XT.
-            # The trailing NUMBER_TAG/AGC_ANALOG/AGC_DIGITAL/P25WAITING fields
-            # from the BCD996XT spec cause ERR on BCT15X — omit them.
-            cmd = f"SIN,{sys_index},{name},{qk},{hld},{lout},{dly}"
+            # BCT15X SIN 22-field SET format (differs from BCD996XT at positions 18-22).
+            # Positions: 7-11=RSV(5), 12=START_KEY, 13=RECORD, 14-17=RSV(4),
+            #            18=STATE("00"=none), 19=NUMBER_TAG, 20-22=trailing empty.
+            cmd = (
+                f"SIN,{sys_index},{name},{qk},{hld},{lout},{dly},"
+                f",,,,,"    # pos 7-11: RSV (5 empty)
+                f".,"       # pos 12: START_KEY ("." = none)
+                f"0,"       # pos 13: RECORD (0 = off)
+                f",,,,"     # pos 14-17: RSV (4 empty)
+                f"00,"      # pos 18: STATE ("00" = no state)
+                f"NONE,,,"  # pos 19: NUMBER_TAG; 20-22: trailing empty
+            )
             self.log_line.emit(f"  SIN cmd: {cmd!r}")
             try:
                 sin_result = proto.send_command(cmd)
