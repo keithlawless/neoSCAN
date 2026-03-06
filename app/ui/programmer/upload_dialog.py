@@ -27,7 +27,7 @@ import serial
 
 from app.data.models import ScannerConfig, System, Group, Channel, TalkGroup, SYS_TYPE_CONVENTIONAL
 from app.serial.protocol import ScannerProtocol, ProtocolError
-from app.serial.scanner_model import mod_mode_to_string, internal_to_sin_type
+from app.serial.scanner_model import mod_mode_to_string, internal_to_sin_type, internal_to_csy_type
 
 log = logging.getLogger(__name__)
 
@@ -95,14 +95,13 @@ class _UploadWorker(QThread):
             self.status.emit(f"Uploading system: {sys.name}")
             self.log_line.emit(f"\n[System] {sys.name} ({sys.type_name})")
 
-            sys_type_str = internal_to_sin_type(sys.system_type)
-            if sys.is_conventional:
-                sys_type_str = "CNV"
+            # CSY uses a different (simpler) type code than SIN.
+            csy_type = internal_to_csy_type(sys.system_type)
 
             # Create system slot on scanner.
             # CSY requires [SYS_TYPE],[PROTECT] — PROTECT=0 means unprotected.
             try:
-                sys_index = proto.send_command("CSY", sys_type_str, "0")
+                sys_index = proto.send_command("CSY", csy_type, "0")
                 sys_index = sys_index.strip()
             except ProtocolError as e:
                 self.log_line.emit(f"  ERROR creating system: {e}")
@@ -135,6 +134,12 @@ class _UploadWorker(QThread):
 
             done += 1
             self.progress.emit(int(done / total_steps * 100))
+
+            if not sys.is_conventional:
+                self.log_line.emit(
+                    f"  Note: {sys.type_name} system — trunked channel upload is "
+                    "not yet supported. System slot created but channels skipped."
+                )
 
             if sys.is_conventional:
                 for grp in sys.groups:
@@ -265,17 +270,34 @@ class UploadDialog(QDialog):
         sys_group = QGroupBox("Select Systems to Upload")
         sys_layout = QVBoxLayout(sys_group)
         self._sys_list = QListWidget()
+        has_trunked = False
         for i, sys in enumerate(self._config.systems):
-            item = QListWidgetItem(
+            label = (
                 f"[{sys.type_name}] {sys.name or f'System {i+1}'}"
                 f"  ({sum(len(g.channels) for g in sys.groups)} channels)"
             )
+            if not sys.is_conventional:
+                label += "  ⚠ trunked — channels skipped"
+                has_trunked = True
+            item = QListWidgetItem(label)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Checked)
             item.setData(Qt.ItemDataRole.UserRole, i)
             self._sys_list.addItem(item)
         self._sys_list.setMaximumHeight(140)
         sys_layout.addWidget(self._sys_list)
+
+        if has_trunked:
+            from PyQt6.QtWidgets import QLabel as _QLabel
+            warn = _QLabel(
+                "⚠  Trunked systems (Motorola, EDACS, P25, LTR) — the system slot "
+                "will be created on the scanner but trunk frequencies and talk groups "
+                "are not yet uploaded. Only conventional systems are fully supported."
+            )
+            warn.setWordWrap(True)
+            warn.setStyleSheet("color: #b05000; font-size: 11px;")
+            sys_layout.addWidget(warn)
+
         layout.addWidget(sys_group)
 
         # Status

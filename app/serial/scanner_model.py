@@ -50,6 +50,20 @@ INT_TO_SIN_TYPE: dict[int, str] = {
     6: "LTR",
 }
 
+# CSY command accepts a simpler set of type codes than SIN.
+# Maps internal system_type int → CSY type string.
+# Internal constants (from models.py):
+#   1=Conventional, 2=Motorola, 3=EDACS, 4=LTR, 5=P25, 6=EDACS ProVoice, 7=P25(EDACS)
+INT_TO_CSY_TYPE: dict[int, str] = {
+    1: "CNV",   # Conventional
+    2: "MOT",   # Motorola
+    3: "EDC",   # EDACS narrow/wide
+    4: "LTR",   # LTR
+    5: "P25S",  # P25 standard
+    6: "EDS",   # EDACS SCAT / ProVoice
+    7: "P25F",  # P25 one-frequency trunk
+}
+
 
 def sin_type_to_internal(sin_type: str) -> int:
     return SYSTEM_TYPE_MAP.get(sin_type.strip().upper(), 1)
@@ -57,3 +71,8 @@ def sin_type_to_internal(sin_type: str) -> int:
 
 def internal_to_sin_type(system_type: int) -> str:
     return INT_TO_SIN_TYPE.get(system_type, "CNV")
+
+
+def internal_to_csy_type(system_type: int) -> str:
+    """Return the CSY command type code for a given internal system type."""
+    return INT_TO_CSY_TYPE.get(system_type, "CNV")
