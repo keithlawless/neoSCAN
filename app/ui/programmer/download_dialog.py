@@ -4,6 +4,7 @@ Download dialog — reads the channel list from the scanner into a new ScannerCo
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -64,6 +65,19 @@ class _DownloadWorker(QThread):
     def _do_download(self) -> ScannerConfig:
         proto = self._proto
         config = ScannerConfig()
+
+        # Check whether the scanner is in normal scan/monitor mode before we
+        # interrupt it.  STS succeeds in normal operation; it fails (or returns
+        # ERR) inside program mode, so a successful response here confirms the
+        # scanner was scanning/monitoring and should be restored afterward.
+        resume_scan = False
+        try:
+            proto.get_status()
+            resume_scan = True
+            self.log_line.emit("Scanner is in scan mode — will resume after download.")
+        except ProtocolError:
+            pass
+
         self.log_line.emit("Entering program mode…")
         proto.enter_program_mode()
 
@@ -233,6 +247,14 @@ class _DownloadWorker(QThread):
             self.log_line.emit("\nExited program mode.")
         except ProtocolError as e:
             self.log_line.emit(f"Warning: EPG error: {e}")
+
+        if resume_scan:
+            time.sleep(1.5)
+            try:
+                proto.send_key("S")
+                self.log_line.emit("Scan mode restored.")
+            except ProtocolError as e:
+                self.log_line.emit(f"Warning: could not resume scan: {e}")
 
         self.progress.emit(100)
         self.log_line.emit(
