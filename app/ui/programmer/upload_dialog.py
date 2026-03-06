@@ -56,12 +56,14 @@ class _UploadWorker(QThread):
         proto: ScannerProtocol,
         config: ScannerConfig,
         selected_systems: list[int],
+        clear_first: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._proto = proto
         self._config = config
         self._selected = selected_systems
+        self._clear_first = clear_first
         self._abort = False
 
     def abort(self) -> None:
@@ -88,6 +90,15 @@ class _UploadWorker(QThread):
 
         self.log_line.emit("Entering program mode…")
         proto.enter_program_mode()
+
+        if self._clear_first:
+            self.status.emit("Clearing scanner memory…")
+            self.log_line.emit("Clearing all scanner memory (CLR)…")
+            try:
+                proto.send_command("CLR")
+                self.log_line.emit("Scanner memory cleared.")
+            except ProtocolError as e:
+                self.log_line.emit(f"WARNING: CLR failed: {e} — continuing anyway.")
 
         for sys in systems:
             if self._abort:
@@ -316,6 +327,14 @@ class UploadDialog(QDialog):
 
         layout.addWidget(sys_group)
 
+        # Clear option
+        self._clear_checkbox = QCheckBox(
+            "Clear all scanner memory before uploading  "
+            "(removes all existing systems, groups, and channels)"
+        )
+        self._clear_checkbox.setChecked(False)
+        layout.addWidget(self._clear_checkbox)
+
         # Status
         self._status_label = QLabel("Ready to upload.")
         layout.addWidget(self._status_label)
@@ -366,7 +385,11 @@ class UploadDialog(QDialog):
         self._close_btn.setEnabled(False)
         self._log.clear()
 
-        worker = _UploadWorker(self._proto, self._config, selected, parent=self)
+        clear_first = self._clear_checkbox.isChecked()
+        worker = _UploadWorker(
+            self._proto, self._config, selected,
+            clear_first=clear_first, parent=self,
+        )
         worker.progress.connect(self._progress.setValue)
         worker.log_line.connect(self._log.append)
         worker.status.connect(self._status_label.setText)
