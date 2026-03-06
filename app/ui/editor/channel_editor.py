@@ -374,6 +374,7 @@ class ChannelEditorPanel(QWidget):
         e_name.setMaxLength(16)
         e_name.setToolTip(HELP["grp_name"])
         e_name.textChanged.connect(lambda v: self._set_group_field(s_idx, g_idx, "name", v))
+        e_name.textChanged.connect(lambda v: self._title.setText(f"Group: {v or '(unnamed)'}"))
         form.addRow("Group Name:", e_name)
         form.addRow("", _help_label("grp_name"))
 
@@ -408,6 +409,7 @@ class ChannelEditorPanel(QWidget):
         e_name.setMaxLength(16)
         e_name.setToolTip(HELP["sys_name"])
         e_name.textChanged.connect(lambda v: self._set_system_field(s_idx, "name", v))
+        e_name.textChanged.connect(lambda v: self._title.setText(f"System: {v or '(unnamed)'}"))
         form.addRow("System Name:", e_name)
         form.addRow("", _help_label("sys_name"))
 
