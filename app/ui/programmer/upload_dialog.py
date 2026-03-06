@@ -93,12 +93,18 @@ class _UploadWorker(QThread):
 
         if self._clear_first:
             self.status.emit("Clearing scanner memory…")
-            self.log_line.emit("Clearing all scanner memory (CLR)…")
+            self.log_line.emit("Clearing all scanner memory (CLR) — this can take up to 60 seconds…")
             try:
-                proto.send_command("CLR")
-                self.log_line.emit("Scanner memory cleared.")
+                result = proto.send_command("CLR")
+                self.log_line.emit(f"Scanner memory cleared (response: {result}).")
             except ProtocolError as e:
-                self.log_line.emit(f"WARNING: CLR failed: {e} — continuing anyway.")
+                self.log_line.emit(
+                    f"ERROR: CLR failed: {e}\n"
+                    "Upload aborted — scanner memory was NOT cleared."
+                )
+                proto.exit_program_mode()
+                self.finished_err.emit(f"CLR (clear memory) failed: {e}")
+                return
 
         for sys in systems:
             if self._abort:

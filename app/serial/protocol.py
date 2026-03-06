@@ -25,7 +25,7 @@ import serial
 log = logging.getLogger(__name__)
 
 COMMAND_TIMEOUT = 3.0   # seconds to wait for a response
-SLOW_COMMAND_TIMEOUT = 30.0  # for commands like CLR/DSY
+SLOW_COMMAND_TIMEOUT = 90.0  # for commands like CLR/DSY ("dozens of seconds" per spec)
 
 # Commands that take noticeably longer
 _SLOW_COMMANDS = {"CLR", "DSY", "DLT"}
