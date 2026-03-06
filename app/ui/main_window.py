@@ -287,6 +287,7 @@ class MainWindow(QMainWindow):
             self._channel_editor.show_channel(self._config, s_idx, g_idx, c_idx)
 
     def _on_editor_modified(self) -> None:
+        self._systems_panel.refresh_selected_item()
         self._update_title()
 
     # ------------------------------------------------------------------

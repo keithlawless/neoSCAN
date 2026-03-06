@@ -99,6 +99,54 @@ class SystemsPanel(QWidget):
         self._model.setHorizontalHeaderLabels(["Name", "Type / Frequency"])
         self._update_toolbar()
 
+    def refresh_selected_item(self) -> None:
+        """
+        Update the display text of the currently selected tree item to match
+        the current model state.  Called after the detail editor modifies a field.
+        """
+        if not self._config:
+            return
+        idx = self._tree.currentIndex()
+        item = self._model.itemFromIndex(idx)
+        if not item:
+            return
+
+        item_type = item.data(ROLE_ITEM_TYPE)
+        s_idx = item.data(ROLE_SYS_IDX)
+        g_idx = item.data(ROLE_GRP_IDX)
+        c_idx = item.data(ROLE_CH_IDX)
+
+        # Grab the name-column item (column 0) for the selected row.
+        # The selection may be on column 1 so always resolve to column 0.
+        name_index = self._model.index(idx.row(), 0, idx.parent())
+        name_item = self._model.itemFromIndex(name_index)
+        info_index = self._model.index(idx.row(), 1, idx.parent())
+        info_item = self._model.itemFromIndex(info_index)
+        if not name_item:
+            return
+
+        if item_type == "system" and s_idx is not None:
+            sys = self._config.systems[s_idx]
+            name_item.setText(sys.name or f"System {s_idx + 1}")
+            if info_item:
+                info_item.setText(sys.type_name)
+
+        elif item_type == "group" and s_idx is not None and g_idx is not None:
+            grp = self._config.systems[s_idx].groups[g_idx]
+            name_item.setText(grp.name or f"Group {g_idx + 1}")
+            if info_item:
+                ch_count = len(grp.channels)
+                info_item.setText(f"{ch_count} channel{'s' if ch_count != 1 else ''}")
+
+        elif item_type == "channel" and all(x is not None for x in (s_idx, g_idx, c_idx)):
+            ch = self._config.systems[s_idx].groups[g_idx].channels[c_idx]
+            name_item.setText(ch.name or "(unnamed)")
+            if info_item:
+                if isinstance(ch, Channel):
+                    info_item.setText(f"{ch.display_frequency()} MHz")
+                else:
+                    info_item.setText(f"TGID {ch.tgid}")
+
     # ------------------------------------------------------------------
     # Tree building
     # ------------------------------------------------------------------
