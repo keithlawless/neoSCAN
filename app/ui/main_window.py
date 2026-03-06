@@ -88,6 +88,12 @@ class MainWindow(QMainWindow):
         # File
         file_menu = menubar.addMenu("&File")
 
+        new_action = QAction("&New…", self)
+        new_action.setShortcut(QKeySequence.StandardKey.New)
+        new_action.setStatusTip("Create a new empty channel list")
+        new_action.triggered.connect(self._on_file_new)
+        file_menu.addAction(new_action)
+
         open_action = QAction("&Open…", self)
         open_action.setShortcut(QKeySequence.StandardKey.Open)
         open_action.setStatusTip("Open a .996 channel file")
@@ -301,6 +307,23 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # File actions
     # ------------------------------------------------------------------
+
+    def _on_file_new(self) -> None:
+        if self._config and self._config.modified:
+            reply = QMessageBox.question(
+                self, "Unsaved Changes",
+                "You have unsaved changes. Create a new file anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        self._config = ScannerConfig()
+        self._systems_panel.load_config(self._config)
+        self._channel_editor.set_config(self._config)
+        self._channel_editor.clear()
+        self._update_title()
+        self._update_file_status()
+        self._update_connection_ui()
 
     def _on_file_open(self) -> None:
         if self._config and self._config.modified:
