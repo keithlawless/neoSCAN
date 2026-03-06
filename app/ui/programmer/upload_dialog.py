@@ -78,10 +78,21 @@ class _UploadWorker(QThread):
 
     def _delete_all_systems(self, proto: ScannerProtocol) -> int:
         """
-        Walk the scanner's system linked list and delete every system via DSY.
-        Returns the number of systems deleted.
-        Unlike CLR, this does not restore factory-default channels.
+        CLR resets the scanner to factory state but restores factory-default
+        channels (e.g. pre-programmed race tracks on the BCT15X).  DSY alone
+        cannot delete factory systems because they have the protect bit set.
+
+        The solution: CLR first (which clears user channels AND puts factory
+        defaults back into the normal linked list), then walk that list with
+        DSY to delete every system including the factory ones.
         """
+        self.log_line.emit("  Sending CLR to reset scanner to factory state…")
+        try:
+            proto.send_command("CLR")
+            self.log_line.emit("  CLR complete.")
+        except ProtocolError as e:
+            self.log_line.emit(f"  Warning: CLR failed: {e} — continuing with DSY only.")
+
         try:
             first = proto.send_command("SIH")
             sys_index = int(first.strip())
@@ -183,19 +194,33 @@ class _UploadWorker(QThread):
             # SET format: SIN,[INDEX],[NAME],[QUICK_KEY],[HLD],[LOUT],[DLY],
             #   [RSV]*5,[START_KEY],[RECORD],[RSV]*5,[NUMBER_TAG],
             #   [AGC_ANALOG],[AGC_DIGITAL],[P25WAITING]
-            # Empty fields ("," only) are left unchanged by the scanner.
-            qk = sys.quick_key or "."
+            # Sanitise fields — any format error causes SIN to abort silently.
+            name = (sys.name or "").strip()[:16]
+            qk = (sys.quick_key or ".").strip() or "."
+            try:
+                hld = str(max(0, min(255, int(sys.hold_time or 2))))
+            except ValueError:
+                hld = "2"
+            # DLY must be one of the accepted values; clamp to nearest valid value.
+            _valid_dly = (-10, -5, -2, 0, 1, 2, 5, 10, 30)
+            try:
+                dly_int = int(sys.delay_time or 2)
+                dly = str(min(_valid_dly, key=lambda v: abs(v - dly_int)))
+            except ValueError:
+                dly = "2"
             lout = 1 if sys.lockout else 0
             cmd = (
-                f"SIN,{sys_index},{sys.name},{qk},"
-                f"{sys.hold_time},{lout},{sys.delay_time},"
+                f"SIN,{sys_index},{name},{qk},"
+                f"{hld},{lout},{dly},"
                 f",,,,,,,,,,,"  # 11 commas → 12 total empty fields (RSV*5, START_KEY, RECORD, RSV*5)
                 f"NONE,0,0,0"   # NUMBER_TAG, AGC_ANALOG, AGC_DIGITAL, P25WAITING
             )
             try:
-                proto.send_command(cmd)
+                sin_result = proto.send_command(cmd)
+                if sin_result != "OK":
+                    self.log_line.emit(f"  Warning: SIN returned {sin_result!r} — system name may not have been set.")
             except ProtocolError as e:
-                self.log_line.emit(f"  Warning: SIN error: {e}")
+                self.log_line.emit(f"  Warning: SIN error: {e} — system name may not have been set.")
 
             done += 1
             self.progress.emit(int(done / total_steps * 100))
