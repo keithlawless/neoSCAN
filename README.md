@@ -60,6 +60,72 @@ Run tests:
 pytest tests/
 ```
 
+## Building a Packaged App
+
+NeoSCAN uses [PyInstaller](https://pyinstaller.org) to produce standalone executables
+that do not require Python to be installed on the target machine.
+
+### Prerequisites
+
+Install PyInstaller into your virtual environment:
+
+```bash
+pip install pyinstaller
+```
+
+On macOS, installing `pyobjc` is also recommended so the app name appears correctly
+in the Dock and menu bar when running from source:
+
+```bash
+pip install pyobjc
+```
+
+### Regenerate Icons (if you change the SVG)
+
+```bash
+python tools/generate_icons.py
+```
+
+### Build
+
+Run PyInstaller from the project root using the provided spec file:
+
+```bash
+pyinstaller neoscan.spec
+```
+
+Output is placed in `dist/`:
+
+| Platform | Output |
+|----------|--------|
+| macOS    | `dist/NeoSCAN.app` — drag to `/Applications` |
+| Windows  | `dist/NeoSCAN.exe` — single self-contained executable |
+| Linux    | `dist/NeoSCAN/` — directory; run `dist/NeoSCAN/neoscan` |
+
+To clean previous builds before rebuilding:
+
+```bash
+rm -rf build/ dist/
+pyinstaller neoscan.spec
+```
+
+### macOS: Creating a DMG
+
+After building, you can package `NeoSCAN.app` into a distributable DMG with:
+
+```bash
+hdiutil create -volname NeoSCAN -srcfolder dist/NeoSCAN.app \
+    -ov -format UDZO dist/NeoSCAN.dmg
+```
+
+### Windows: Code Signing (optional)
+
+Sign the executable before distribution to avoid SmartScreen warnings:
+
+```powershell
+signtool sign /a /fd SHA256 /tr http://timestamp.digicert.com dist\NeoSCAN.exe
+```
+
 ## Project Structure
 
 ```
@@ -89,9 +155,13 @@ neo-scan/
         log_panel.py               Transmission logger with CSV export
       settings/
         settings_dialog.py         COM port selection dialog
+        preferences_dialog.py      App preferences (port, theme, log path)
   resources/
-    icons/                         App icons (to be added)
+    icons/                         SVG source + PNG icons at multiple sizes
     help_text/                     Help text files (to be added)
+  tools/
+    generate_icons.py              Regenerate PNG icons from SVG source
+  neoscan.spec                     PyInstaller build spec (all platforms)
   tests/                           Test suite
   sample-data/
     sample.996                     Sample FreeSCAN file for testing
