@@ -76,6 +76,44 @@ class _UploadWorker(QThread):
             log.exception("Upload failed")
             self.finished_err.emit(str(exc))
 
+    def _delete_all_systems(self, proto: ScannerProtocol) -> int:
+        """
+        Walk the scanner's system linked list and delete every system via DSY.
+        Returns the number of systems deleted.
+        Unlike CLR, this does not restore factory-default channels.
+        """
+        try:
+            first = proto.send_command("SIH")
+            sys_index = int(first.strip())
+        except (ProtocolError, ValueError):
+            return 0
+
+        deleted = 0
+        seen = set()  # guard against corrupt linked lists
+        while sys_index not in (-1, 0) and sys_index not in seen:
+            seen.add(sys_index)
+            # Read next pointer BEFORE deleting (DSY removes the node)
+            try:
+                sin = proto.send_command(f"SIN,{sys_index}")
+                next_index_str = sin.split(",")[12] if sin else "-1"
+                try:
+                    next_index = int(next_index_str)
+                except ValueError:
+                    next_index = -1
+            except ProtocolError:
+                next_index = -1
+
+            try:
+                proto.send_command(f"DSY,{sys_index}")
+                deleted += 1
+                self.log_line.emit(f"  Deleted system at index {sys_index}.")
+            except ProtocolError as e:
+                self.log_line.emit(f"  Warning: could not delete system {sys_index}: {e}")
+
+            sys_index = next_index
+
+        return deleted
+
     def _do_upload(self) -> None:
         proto = self._proto
         config = self._config
@@ -92,18 +130,18 @@ class _UploadWorker(QThread):
         proto.enter_program_mode()
 
         if self._clear_first:
-            self.status.emit("Clearing scanner memory…")
-            self.log_line.emit("Clearing all scanner memory (CLR) — this can take up to 60 seconds…")
+            self.status.emit("Deleting existing systems…")
+            self.log_line.emit("Deleting all existing systems from scanner…")
             try:
-                result = proto.send_command("CLR")
-                self.log_line.emit(f"Scanner memory cleared (response: {result}).")
+                deleted = self._delete_all_systems(proto)
+                self.log_line.emit(f"Deleted {deleted} existing system(s).")
             except ProtocolError as e:
                 self.log_line.emit(
-                    f"ERROR: CLR failed: {e}\n"
-                    "Upload aborted — scanner memory was NOT cleared."
+                    f"ERROR: Failed to delete existing systems: {e}\n"
+                    "Upload aborted."
                 )
                 proto.exit_program_mode()
-                self.finished_err.emit(f"CLR (clear memory) failed: {e}")
+                self.finished_err.emit(f"Failed to delete existing systems: {e}")
                 return
 
         for sys in systems:
@@ -335,8 +373,8 @@ class UploadDialog(QDialog):
 
         # Clear option
         self._clear_checkbox = QCheckBox(
-            "Clear all scanner memory before uploading  "
-            "(removes all existing systems, groups, and channels)"
+            "Delete all existing systems before uploading  "
+            "(removes all programmed systems, groups, and channels)"
         )
         self._clear_checkbox.setChecked(False)
         layout.addWidget(self._clear_checkbox)
