@@ -80,6 +80,7 @@ class LogPanel(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(POLL_INTERVAL_MS)
         self._timer.timeout.connect(self._poll)
+        self._logging = False  # True only when user has started logging
         self._entries: list[_TransmissionEntry] = []
         self._active: Optional[_TransmissionEntry] = None
         self._last_info: Optional[dict] = None
@@ -125,9 +126,16 @@ class LogPanel(QWidget):
 
     def set_protocol(self, proto: ScannerProtocol | None) -> None:
         self._proto = proto
-        if not proto:
-            self._stop_logging()
-        self._set_controls(connected=proto is not None, logging=self._timer.isActive())
+        if proto:
+            self._timer.start()
+        else:
+            self._logging = False
+            self._timer.stop()
+            if self._active:
+                self._active.end_time = datetime.now()
+                self._refresh_row(len(self._entries) - 1)
+                self._active = None
+        self._set_controls(connected=proto is not None, logging=self._logging)
 
     def _set_controls(self, connected: bool, logging: bool) -> None:
         self._start_btn.setEnabled(connected and not logging)
@@ -137,14 +145,14 @@ class LogPanel(QWidget):
     def _start_logging(self) -> None:
         if not self._proto:
             return
-        self._timer.start()
+        self._logging = True
         self._status_label.setText("Logging…")
         self._status_label.setStyleSheet("font-size: 11px; color: green; font-weight: bold;")
         self._set_controls(connected=True, logging=True)
         log.info("Transmission logging started")
 
     def _stop_logging(self) -> None:
-        self._timer.stop()
+        self._logging = False
         if self._active:
             self._active.end_time = datetime.now()
             self._refresh_row(len(self._entries) - 1)
@@ -169,18 +177,19 @@ class LogPanel(QWidget):
 
         if info:
             self.channel_info_updated.emit(info)
-            if self._active is None:
-                # New transmission started
-                entry = _TransmissionEntry(info)
-                self._entries.append(entry)
-                self._active = entry
-                self._add_table_row(entry)
-                self._set_controls(connected=True, logging=True)
-            else:
-                # Ongoing transmission — update duration in place
-                self._refresh_row(len(self._entries) - 1)
+            if self._logging:
+                if self._active is None:
+                    # New transmission started
+                    entry = _TransmissionEntry(info)
+                    self._entries.append(entry)
+                    self._active = entry
+                    self._add_table_row(entry)
+                    self._set_controls(connected=True, logging=True)
+                else:
+                    # Ongoing transmission — update duration in place
+                    self._refresh_row(len(self._entries) - 1)
         else:
-            if self._active is not None:
+            if self._logging and self._active is not None:
                 # Transmission ended
                 self._active.end_time = datetime.now()
                 self._refresh_row(len(self._entries) - 1)
