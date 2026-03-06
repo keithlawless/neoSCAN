@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Background circle -->
+  <circle cx="128" cy="128" r="120" fill="#1a1a2e" stroke="#4a90d9" stroke-width="4"/>
+
+  <!-- Scanner body (main box) -->
+  <rect x="52" y="110" width="152" height="100" rx="6" ry="6" fill="#2d2d2d" stroke="#5a5a7a" stroke-width="2"/>
+
+  <!-- Scanner front panel -->
+  <rect x="60" y="118" width="136" height="84" rx="4" ry="4" fill="#1e1e3a"/>
+
+  <!-- Display screen -->
+  <rect x="68" y="125" width="120" height="34" rx="3" ry="3" fill="#0a0a1a" stroke="#3a6a9a" stroke-width="1.5"/>
+  <!-- Screen text lines -->
+  <rect x="74" y="131" width="60" height="5" rx="2" fill="#00cc66" opacity="0.9"/>
+  <rect x="74" y="140" width="40" height="4" rx="2" fill="#00cc66" opacity="0.6"/>
+  <rect x="74" y="148" width="50" height="4" rx="2" fill="#00aa55" opacity="0.5"/>
+
+  <!-- Knob left -->
+  <circle cx="84" cy="178" r="12" fill="#3a3a5a" stroke="#6a6a9a" stroke-width="1.5"/>
+  <circle cx="84" cy="178" r="5" fill="#5a5a7a"/>
+  <line x1="84" y1="166" x2="84" y2="172" stroke="#aaaacc" stroke-width="2" stroke-linecap="round"/>
+
+  <!-- Knob right -->
+  <circle cx="172" cy="178" r="12" fill="#3a3a5a" stroke="#6a6a9a" stroke-width="1.5"/>
+  <circle cx="172" cy="178" r="5" fill="#5a5a7a"/>
+  <line x1="172" y1="166" x2="172" y2="172" stroke="#aaaacc" stroke-width="2" stroke-linecap="round"/>
+
+  <!-- Speaker grille dots -->
+  <circle cx="116" cy="172" r="2" fill="#4a4a6a"/>
+  <circle cx="124" cy="172" r="2" fill="#4a4a6a"/>
+  <circle cx="132" cy="172" r="2" fill="#4a4a6a"/>
+  <circle cx="140" cy="172" r="2" fill="#4a4a6a"/>
+  <circle cx="116" cy="180" r="2" fill="#4a4a6a"/>
+  <circle cx="124" cy="180" r="2" fill="#4a4a6a"/>
+  <circle cx="132" cy="180" r="2" fill="#4a4a6a"/>
+  <circle cx="140" cy="180" r="2" fill="#4a4a6a"/>
+  <circle cx="116" cy="188" r="2" fill="#4a4a6a"/>
+  <circle cx="124" cy="188" r="2" fill="#4a4a6a"/>
+  <circle cx="132" cy="188" r="2" fill="#4a4a6a"/>
+  <circle cx="140" cy="188" r="2" fill="#4a4a6a"/>
+
+  <!-- Antenna (on top center) -->
+  <rect x="124" y="76" width="8" height="36" rx="2" ry="2" fill="#5a5a7a" stroke="#7a7a9a" stroke-width="1"/>
+  <circle cx="128" cy="74" r="5" fill="#7a7a9a"/>
+
+  <!-- Lightning bolt LEFT (large, on left side of antenna) -->
+  <polygon points="90,50  76,76  88,76  72,104  102,74  88,74  104,50"
+           fill="#FFD700" stroke="#FFA500" stroke-width="1.5" stroke-linejoin="round"/>
+
+  <!-- Lightning bolt RIGHT (large, on right side of antenna) -->
+  <polygon points="166,50  152,76  164,76  148,104  178,74  164,74  180,50"
+           fill="#FFD700" stroke="#FFA500" stroke-width="1.5" stroke-linejoin="round"/>
+
+  <!-- Lightning bolt small LEFT -->
+  <polygon points="62,38  54,56  62,56  50,78  72,58  62,58  72,38"
+           fill="#FFB700" stroke="#FF8C00" stroke-width="1" stroke-linejoin="round" opacity="0.85"/>
+
+  <!-- Lightning bolt small RIGHT -->
+  <polygon points="194,38  186,56  194,56  182,78  204,58  194,58  204,38"
+           fill="#FFB700" stroke="#FF8C00" stroke-width="1" stroke-linejoin="round" opacity="0.85"/>
+
+  <!-- Scan line on display (animated or static glow) -->
+  <rect x="68" y="125" width="120" height="34" rx="3" ry="3" fill="none" stroke="#4a90d9" stroke-width="1" opacity="0.4"/>
+</svg>

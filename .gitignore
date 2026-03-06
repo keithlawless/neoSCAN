@@ -15,8 +15,7 @@ build/
 venv/
 env/
 
-# PyInstaller
-*.spec
+# PyInstaller build artefacts (keep *.spec source files)
 dist/
 build/
 

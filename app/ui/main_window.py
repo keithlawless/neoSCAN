@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
 from app.serial import port_manager
 from app.serial.protocol import ScannerProtocol, ProtocolError
 from app.ui.settings.settings_dialog import ConnectionSettingsDialog
+from app.ui.settings.preferences_dialog import PreferencesDialog
 from app.ui.editor.systems_panel import SystemsPanel
 from app.ui.editor.channel_editor import ChannelEditorPanel
 from app.ui.editor.csv_import_dialog import CSVImportDialog
@@ -112,6 +113,13 @@ class MainWindow(QMainWindow):
         self._import_csv_action.triggered.connect(self._on_import_csv)
         self._import_csv_action.setEnabled(False)
         file_menu.addAction(self._import_csv_action)
+
+        file_menu.addSeparator()
+
+        prefs_action = QAction("&Preferences…", self)
+        prefs_action.setShortcut(QKeySequence("Ctrl+,"))
+        prefs_action.triggered.connect(self._on_preferences)
+        file_menu.addAction(prefs_action)
 
         file_menu.addSeparator()
 
@@ -463,13 +471,26 @@ class MainWindow(QMainWindow):
     # Misc
     # ------------------------------------------------------------------
 
+    def _on_preferences(self) -> None:
+        dlg = PreferencesDialog(parent=self)
+        dlg.exec()
+
     def _on_about(self) -> None:
-        QMessageBox.about(
-            self, f"About {APP_NAME}",
+        from pathlib import Path
+        from PyQt6.QtGui import QPixmap
+        icon_path = Path(__file__).resolve().parents[3] / "resources" / "icons" / "neoscan_64.png"
+        box = QMessageBox(self)
+        box.setWindowTitle(f"About {APP_NAME}")
+        if icon_path.exists():
+            box.setIconPixmap(QPixmap(str(icon_path)))
+        box.setText(
             "<h2>NeoSCAN</h2>"
-            "<p>Cross-platform programmer for Uniden radio scanners.</p>"
-            "<p>Supports BCT15-X and BCD996XT via USB serial.</p>",
+            "<p>Version 1.0</p>"
+            "<p>Cross-platform programmer and remote control for<br>"
+            "Uniden BCT15-X and BCD996XT radio scanners.</p>"
+            "<p>Released under the GNU General Public License v3.</p>"
         )
+        box.exec()
 
     def closeEvent(self, event) -> None:
         if self._config and self._config.modified:

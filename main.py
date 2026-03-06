@@ -5,9 +5,23 @@ from __future__ import annotations
 
 import logging
 import sys
+from pathlib import Path
 
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QIcon
+
+# Fix macOS dock/menu-bar showing "Python" instead of "NeoSCAN".
+# This must happen before QApplication is created.
+if sys.platform == "darwin":
+    try:
+        from Foundation import NSBundle  # type: ignore[import]
+        bundle = NSBundle.mainBundle()
+        if bundle:
+            info = bundle.localizedInfoDictionary() or bundle.infoDictionary()
+            if info and info.get("CFBundleName") == "Python":
+                info["CFBundleName"] = "NeoSCAN"
+    except Exception:
+        pass  # pyobjc not installed — name stays as "Python" in dev; fine in packaged app
 
 from app.ui.main_window import MainWindow
 
@@ -16,11 +30,18 @@ logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
 )
 
+_ROOT = Path(__file__).resolve().parent
+_ICON_PATH = _ROOT / "resources" / "icons" / "neoscan.png"
+
 
 def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("NeoSCAN")
     app.setOrganizationName("NeoSCAN")
+    app.setApplicationDisplayName("NeoSCAN")
+
+    if _ICON_PATH.exists():
+        app.setWindowIcon(QIcon(str(_ICON_PATH)))
 
     window = MainWindow()
     window.show()
