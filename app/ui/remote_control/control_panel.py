@@ -119,7 +119,7 @@ _NUM_KEYS = [
 # Function keys shown in two rows below the d-pad
 _FUNC_KEYS = [
     ("SCAN","S"), ("HOLD","H"), ("FUNC","F"), ("MENU","M"),
-    ("SRCH","T"), ("AVOID","A"), ("ATT","Y"),  ("REV","V"),
+    ("SRCH","T"), ("AVOID","L"), ("ATT","Y"),  ("REV","V"),
 ]
 
 VOL_MIN, VOL_MAX = 0, 29
