@@ -174,8 +174,8 @@ class ScannerProtocol:
                 "sys_name", "grp_name", "ch_name",
                 "sql", "mute", "sys_tag", "chan_tag", "p25nac"]
         info = {keys[i]: fields[i] for i in range(min(len(keys), len(fields)))}
-        # SQL=1 means squelch open (active transmission); anything else = idle
-        if info.get("sql") != "1":
+        # When idle the scanner returns all-empty fields; frequency absent = no transmission
+        if not info.get("frequency"):
             return None
         return info
 

@@ -61,7 +61,7 @@ class _TransmissionEntry:
 
     def freq_display(self) -> str:
         try:
-            return f"{float(self.frequency)/10000:.4f} MHz"
+            return f"{float(self.frequency):.4f} MHz"
         except (ValueError, TypeError):
             return self.frequency
 

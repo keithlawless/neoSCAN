@@ -129,7 +129,7 @@ class ControlPanel(QWidget):
 
         if freq:
             try:
-                freq_str = f"{float(freq)/10000:.4f} MHz"
+                freq_str = f"{float(freq):.4f} MHz"
             except ValueError:
                 freq_str = freq
         else:
