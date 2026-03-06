@@ -99,30 +99,35 @@ class _UploadWorker(QThread):
             if sys.is_conventional:
                 sys_type_str = "CNV"
 
-            # Create system slot on scanner
+            # Create system slot on scanner.
+            # CSY requires [SYS_TYPE],[PROTECT] — PROTECT=0 means unprotected.
             try:
-                sys_index = proto.send_command("CSY", sys_type_str)
+                sys_index = proto.send_command("CSY", sys_type_str, "0")
                 sys_index = sys_index.strip()
             except ProtocolError as e:
                 self.log_line.emit(f"  ERROR creating system: {e}")
                 continue
 
-            if not sys_index or sys_index in ("-1", "ERR", "0"):
-                self.log_line.emit("  ERROR: Scanner returned invalid system index")
+            if not sys_index or sys_index in ("-1", "ERR"):
+                self.log_line.emit(
+                    f"  ERROR: Scanner returned invalid system index ({sys_index!r}). "
+                    "Scanner memory may be full — try clearing the scanner first."
+                )
                 continue
 
-            # Configure system
-            if sys.is_conventional:
-                cmd = (
-                    f"SIN,{sys_index},{sys.name},{sys.quick_key},"
-                    f"{sys.hold_time},{1 if sys.lockout else 0},{sys.delay_time},"
-                    f"{1 if sys.data_skip else 0},,,AUTO,8"
-                )
-            else:
-                cmd = (
-                    f"SIN,{sys_index},{sys.name},{sys.quick_key},"
-                    f"{sys.hold_time},{1 if sys.lockout else 0},{sys.delay_time}"
-                )
+            # Configure system via SIN.
+            # SET format: SIN,[INDEX],[NAME],[QUICK_KEY],[HLD],[LOUT],[DLY],
+            #   [RSV]*5,[START_KEY],[RECORD],[RSV]*5,[NUMBER_TAG],
+            #   [AGC_ANALOG],[AGC_DIGITAL],[P25WAITING]
+            # Empty fields ("," only) are left unchanged by the scanner.
+            qk = sys.quick_key or "."
+            lout = 1 if sys.lockout else 0
+            cmd = (
+                f"SIN,{sys_index},{sys.name},{qk},"
+                f"{sys.hold_time},{lout},{sys.delay_time},"
+                f",,,,,,,,,,,"  # 11 commas → 12 total empty fields (RSV*5, START_KEY, RECORD, RSV*5)
+                f"NONE,0,0,0"   # NUMBER_TAG, AGC_ANALOG, AGC_DIGITAL, P25WAITING
+            )
             try:
                 proto.send_command(cmd)
             except ProtocolError as e:
@@ -146,11 +151,15 @@ class _UploadWorker(QThread):
                         self.progress.emit(int(done / total_steps * 100))
                         continue
 
-                    # Configure group
+                    # Configure group via GIN.
+                    # SET format: GIN,[GRP_INDEX],[NAME],[QUICK_KEY],[LOUT],
+                    #   [LATITUDE],[LONGITUDE],[RANGE],[GPS_ENABLE]
+                    grp_qk = grp.quick_key or "."
+                    grp_lout = 1 if grp.lockout else 0
                     try:
                         proto.send_command(
                             f"GIN,{grp_index},{grp.name},"
-                            f"{grp.quick_key},{1 if grp.lockout else 0}"
+                            f"{grp_qk},{grp_lout},,,,"  # trailing empty geo fields
                         )
                     except ProtocolError as e:
                         self.log_line.emit(f"    Warning: GIN error: {e}")
@@ -186,14 +195,21 @@ class _UploadWorker(QThread):
                             done += 1
                             continue
 
-                        # Upload channel
+                        # Upload channel via CIN.
+                        # SET format: CIN,[INDEX],[NAME],[FRQ],[MOD],[CTCSS/DCS],
+                        #   [TLOCK],[LOUT],[PRI],[ATT],[ALT],[ALTL],
+                        #   [RECORD],[AUDIO_TYPE],[P25NAC],[NUMBER_TAG],
+                        #   [ALT_COLOR],[ALT_PATTERN],[VOL_OFFSET]
+                        tone = ch.tone or "0"
+                        alt = ch.alert_tone or "0"
+                        altl = ch.alert_level or "0"
                         try:
                             proto.send_command(
                                 f"CIN,{ch_index},{ch.name},{freq_int},{mod},"
-                                f"{ch.tone},{1 if ch.tone_lockout else 0},"
+                                f"{tone},{1 if ch.tone_lockout else 0},"
                                 f"{1 if ch.lockout else 0},{1 if ch.priority else 0},"
-                                f"{1 if ch.attenuator else 0},{ch.alert_tone},"
-                                f"{ch.alert_level}"
+                                f"{1 if ch.attenuator else 0},{alt},{altl},"
+                                f"0,0,0,NONE,OFF,0,0"  # RECORD,AUDIO_TYPE,P25NAC,NUMBER_TAG,ALT_COLOR,ALT_PATTERN,VOL_OFFSET
                             )
                             self.log_line.emit(
                                 f"    {ch.name}  {freq_raw:.4f} MHz  {mod}"
