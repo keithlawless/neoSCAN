@@ -407,8 +407,11 @@ class _UploadWorker(QThread):
         #       <base2>,<mstep2>,<offset2>,<dig_code=0>
         try:
             fmap = sys.fleet_map or "16"
-            ctm = sys.custom_fleet_map or ""
-            emg_level = sys.emg_alert_level or "1"
+            # Custom fleet map must be exactly 8 hex chars.
+            # FreeSCAN's MakeFleetMap("") returns "00000000" — do the same.
+            raw_ctm = (sys.custom_fleet_map or "").strip()
+            ctm = raw_ctm if len(raw_ctm) == 8 else "00000000"
+            emg_level = sys.emg_alert_level or "0"
             emg_type = "0"  # numeric index; NONE=0
             proto.set_trunking_params(
                 int(sys_index),
@@ -466,6 +469,7 @@ class _UploadWorker(QThread):
                 self.log_line.emit(f"  Warning: SIF error: {e}")
 
             self.log_line.emit(f"  Uploading {len(sys.trunk_frequencies)} trunk frequency(ies) to site {site_index}")
+            auto_lcn = 0  # FreeSCAN-style auto-increment: starts at 0, increments before use
             for tf in sys.trunk_frequencies:
                 if self._abort:
                     break
@@ -483,8 +487,12 @@ class _UploadWorker(QThread):
 
                 # TFQ SET (BCT15X format): freq_x10000,lcn,lout
                 # BCT15X uses 3-field format: no record/numtag/vol_offset (those
-                # are BCD996XT extensions).  LCN 0 is invalid; auto-increment from 1.
-                lcn = tf.lcn or "0"
+                # are BCD996XT extensions).
+                # LCN 0 is invalid — mirror FreeSCAN: auto-increment from 1, or
+                # use the stored LCN if it is non-zero.
+                auto_lcn += 1
+                stored_lcn = int(tf.lcn) if tf.lcn and tf.lcn.strip().isdigit() else 0
+                lcn = str(stored_lcn) if stored_lcn > 0 else str(auto_lcn)
                 try:
                     tfq_resp = proto.set_trunk_freq(
                         freq_idx,
