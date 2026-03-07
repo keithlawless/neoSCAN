@@ -24,13 +24,42 @@ from PyQt6.QtCore import (
     pyqtSlot,
 )
 
-from app.audio.recorder import AudioRecorder
+from app.audio.recorder import AudioRecorder, SAMPLE_RATE
 from app.audio.transcript_writer import TranscriptWriter
 from app.ui.settings.preferences_dialog import load_prefs
 
 log = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "base"
+
+
+def _reduce_noise(audio: np.ndarray) -> np.ndarray:
+    """
+    Apply stationary noise reduction using noisereduce.
+
+    Uses the whole clip to estimate the noise profile (stationary=True),
+    which works well for the consistent background hiss / squelch static
+    present in scanner audio.  prop_decrease=0.75 leaves a little residual
+    noise so Whisper is not confused by over-processed silence.
+
+    Falls back to the original audio if noisereduce is not installed or
+    raises an unexpected error.
+    """
+    try:
+        import noisereduce as nr  # deferred — optional dependency
+        reduced = nr.reduce_noise(
+            y=audio,
+            sr=SAMPLE_RATE,
+            stationary=True,
+            prop_decrease=0.75,
+        )
+        return reduced.astype(np.float32)
+    except ImportError:
+        log.debug("noisereduce not installed — skipping noise reduction")
+        return audio
+    except Exception as exc:
+        log.warning("Noise reduction failed — using raw audio: %s", exc)
+        return audio
 
 
 @dataclass
@@ -110,8 +139,9 @@ class TranscriberWorker(QThread):
         try:
             log.info("Transcribing row %d (%.1fs of audio from device)…",
                      job.row_index, duration)
+            audio = _reduce_noise(job.audio)
             result = self._model.transcribe(
-                job.audio,
+                audio,
                 fp16=False,
                 language="en",
             )
