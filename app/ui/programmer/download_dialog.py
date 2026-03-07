@@ -291,22 +291,25 @@ class _DownloadWorker(QThread):
             self.log_line.emit(f"  TRN error: {e}")
             return 0
 
-        # TRN field indices (0-based):
-        #  [8]=ID_SEARCH, [9]=STATUS_BIT, [10]=END_CODE, [11]=FMAP,
-        #  [12]=CTM_FMAP, [13]=I_CALL, [14]=MOT_ID, [15]=P25_NAC,
-        #  [16]=PRI_ID_SCAN, [17]=TGID_GRP_HEAD
+        self.log_line.emit(f"  TRN raw ({len(trn)} fields): {','.join(trn[:20])}")
+        self.log_line.emit(f"  SIN field[13] (first site/group head): {first_site_field}")
+
+        # TRN GET response field indices (0-based, after command prefix stripped):
+        # [0]=ID_SEARCH [1]=S_BIT [2]=END_CODE [3]=AFS [4-5]=RSV [6]=EMG [7]=EMGL
+        # [8]=FMAP [9]=CTM_FMAP [10-17]=8×RSV
+        # [18]=TGID_GRP_HEAD [19]=TGID_GRP_TAIL [20]=ID_LOUT_GRP_HEAD [21]=ID_LOUT_GRP_TAIL
+        # [22]=MOT_ID [23]=EMG_COLOR [24]=EMG_PATTERN [25]=P25NAC [26]=PRI_ID_SCAN
         def _f(fields: list[str], i: int) -> str:
             return fields[i].strip() if i < len(fields) else ""
 
-        sys_obj.id_search = _f(trn, 8)
-        sys_obj.ignore_status_bit = _f(trn, 9) == "1"
-        sys_obj.end_code = _f(trn, 10) == "1"
-        sys_obj.fleet_map = _f(trn, 11) or "16"
-        sys_obj.custom_fleet_map = _f(trn, 12)
-        sys_obj.icall = _f(trn, 13) == "1"
-        sys_obj.mot_id = _f(trn, 14)
-        sys_obj.p25_nac = _f(trn, 15) or "SRCH"
-        sys_obj.pri_id_scan = _f(trn, 16)
+        sys_obj.id_search = _f(trn, 0)
+        sys_obj.ignore_status_bit = _f(trn, 1) == "1"
+        sys_obj.end_code = _f(trn, 2) == "1"
+        sys_obj.fleet_map = _f(trn, 8) or "16"
+        sys_obj.custom_fleet_map = _f(trn, 9)
+        sys_obj.mot_id = _f(trn, 22)
+        sys_obj.p25_nac = _f(trn, 25) or "SRCH"
+        sys_obj.pri_id_scan = _f(trn, 26)
 
         # --- Sites → trunk frequencies ---
         try:
@@ -324,13 +327,15 @@ class _DownloadWorker(QThread):
             site_name = _f(sif, 1)
             site_qk = _f(sif, 2)
             site_lockout = _f(sif, 4)
-            # SIF field[9]=FWD_INDEX (next site), field[11]=CHN_HEAD (first trunk freq)
+            # SIF GET response (0-based): [0]=RSV [1]=NAME [2]=QK [3]=HLD [4]=LOUT
+            # [5]=MOD [6]=ATT [7]=C-CH [8-9]=RSV [10]=REV_INDEX [11]=FWD_INDEX
+            # [12]=SYS_INDEX [13]=CHN_HEAD [14]=CHN_TAIL ...
             try:
-                next_site_idx = int(_f(sif, 9))
+                next_site_idx = int(_f(sif, 11))   # FWD_INDEX = next site
             except ValueError:
                 next_site_idx = -1
             try:
-                tfq_idx = int(_f(sif, 11))
+                tfq_idx = int(_f(sif, 13))          # CHN_HEAD = first trunk freq
             except ValueError:
                 tfq_idx = -1
 
@@ -381,7 +386,7 @@ class _DownloadWorker(QThread):
 
         # --- TGID groups → talk groups ---
         try:
-            tgid_grp_idx = int(_f(trn, 17))
+            tgid_grp_idx = int(_f(trn, 18))
         except ValueError:
             tgid_grp_idx = -1
 
@@ -420,18 +425,18 @@ class _DownloadWorker(QThread):
                     self.log_line.emit(f"    TIN error at {tgid_idx}: {e}")
                     break
 
-                # TIN fields (0-based): [0]=NAME, [1]=TGID, [2]=LOUT,
-                #   [3]=PRI, [4]=ALERT_TONE, [5]=ALERT_LVL, [6]=AUDIO_TYPE,
-                #   [7]=REV_INDEX, [8]=FWD_INDEX
+                # TIN GET response (0-based): [0]=NAME [1]=TGID [2]=LOUT [3]=PRI
+                #   [4]=ALT [5]=ALTL [6]=REV_INDEX [7]=FWD_INDEX [8]=SYS_INDEX
+                #   [9]=GRP_INDEX [10]=RECORD [11]=AUDIO_TYPE [12]=NUMBER_TAG ...
                 tg_name = _f(tin, 0)
                 tgid = _f(tin, 1)
                 tg_lockout = _f(tin, 2)
                 tg_priority = _f(tin, 3)
                 tg_alert = _f(tin, 4)
                 tg_alert_lvl = _f(tin, 5)
-                tg_audio = _f(tin, 6)
+                tg_audio = _f(tin, 11)
                 try:
-                    next_tgid_idx = int(_f(tin, 8))
+                    next_tgid_idx = int(_f(tin, 7))   # FWD_INDEX
                 except ValueError:
                     next_tgid_idx = -1
 

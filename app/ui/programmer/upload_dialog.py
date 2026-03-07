@@ -509,8 +509,7 @@ class _UploadWorker(QThread):
                     continue
 
                 tg_name = "".join(c for c in (tg.name or "").strip() if c in _safe)[:16].strip()
-                # TIN SET (FreeSCAN BCT15X format):
-                #   name, tgid, lockout, priority, alert_tone, alert_level, audio_type
+                # TIN SET format: NAME,TGID,LOUT,PRI,ALT,ALTL,RECORD,AUDIO_TYPE,...
                 try:
                     proto.set_tgid(
                         tgid_idx,
@@ -520,6 +519,7 @@ class _UploadWorker(QThread):
                         "1" if tg.priority else "0",
                         tg.alert_tone or "0",
                         tg.alert_level or "0",
+                        "1" if tg.record else "0",   # RECORD (before AUDIO_TYPE)
                         tg.audio_type or "0",
                     )
                     self.log_line.emit(f"    TGID {tg.tgid}  {tg_name}")
