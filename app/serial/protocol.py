@@ -79,14 +79,17 @@ class ScannerProtocol:
         response = self._read_line(timeout)
         log.debug("RX: %r", response)
 
-        if response == "ERR":
-            raise ProtocolError(f"Scanner returned ERR for command: {full_cmd!r}")
         if not response:
             raise ProtocolError(f"Timeout waiting for response to: {full_cmd!r}")
+        if response == "ERR":
+            raise ProtocolError(f"Scanner returned ERR for command: {full_cmd!r}")
 
         # Strip echoed command prefix if present (e.g. "MDL,BCT15X" → "BCT15X")
         if "," in response:
             _, _, payload = response.partition(",")
+            # Scanner may return "CMD,ERR" (prefix + ERR payload)
+            if payload == "ERR":
+                raise ProtocolError(f"Scanner returned ERR for command: {full_cmd!r}")
             return payload
         return response
 
@@ -284,9 +287,13 @@ class ScannerProtocol:
         """SIF,<site_idx>,<fields> — write site info."""
         self.send_command("SIF", str(site_index), *fields)
 
-    def append_site(self, sys_index: int) -> int:
-        """AST,<sys_idx> — add site to trunked system, return site index."""
-        payload = self.send_command("AST", str(sys_index))
+    def append_site(self, sys_index: int, site_type: str = "M82S") -> int:
+        """AST,<sys_idx>,<site_type> — add site to trunked system, return site index.
+
+        site_type: scanner string e.g. 'M82S' (Mot Type II), 'M81S' (Mot Type I).
+        FreeSCAN sends AST with two parameters; omitting the type causes ERR on BCT15X.
+        """
+        payload = self.send_command("AST", str(sys_index), site_type)
         try:
             return int(payload.split(",")[0])
         except (ValueError, IndexError):
@@ -297,9 +304,9 @@ class ScannerProtocol:
         payload = self.send_command("TFQ", str(freq_index))
         return payload.split(",")
 
-    def set_trunk_freq(self, freq_index: int, *fields: str) -> None:
-        """TFQ,<freq_idx>,<fields> — write trunk frequency."""
-        self.send_command("TFQ", str(freq_index), *fields)
+    def set_trunk_freq(self, freq_index: int, *fields: str) -> str:
+        """TFQ,<freq_idx>,<fields> — write trunk frequency. Returns scanner response."""
+        return self.send_command("TFQ", str(freq_index), *fields)
 
     def add_trunk_freq(self, site_index: int) -> int:
         """ACC,<site_idx> — add trunk frequency to site, return freq index.
@@ -327,9 +334,9 @@ class ScannerProtocol:
         payload = self.send_command("TIN", str(tgid_index))
         return payload.split(",")
 
-    def set_tgid(self, tgid_index: int, *fields: str) -> None:
-        """TIN,<tgid_idx>,<fields> — write talk group info."""
-        self.send_command("TIN", str(tgid_index), *fields)
+    def set_tgid(self, tgid_index: int, *fields: str) -> str:
+        """TIN,<tgid_idx>,<fields> — write talk group info. Returns scanner response."""
+        return self.send_command("TIN", str(tgid_index), *fields)
 
     def append_tgid(self, grp_index: int) -> int:
         """ACT,<grp_idx> — add talk group to TGID group, return tgid index."""

@@ -431,18 +431,40 @@ class _UploadWorker(QThread):
             self.log_line.emit(f"  Warning: TRN error: {e}")
 
         # --- Trunk frequencies ---
-        # CSY,MOT auto-creates the first site. Read SIN field[13] (0-indexed)
-        # to get that site's scanner index, then use ACC,<site_index> / TFQ.
-        # FreeSCAN never uses AST; it creates additional sites via additional CSY calls.
+        # CSY,MOT does NOT auto-create a site on BCT15X; must call AST explicitly.
+        # AST requires two params: AST,<sys_idx>,<site_type_str>
+        # Site type string: M82S = Motorola Type II (SmartZone), M81S = Type I
+        _site_type_map = {2: "M81S", 3: "M82S"}
+        site_type_str = _site_type_map.get(sys.system_type, "M82S")
         site_index = -1
-        try:
-            sin_fields = proto.get_system_info(int(sys_index))
-            # field[13] (0-indexed) = position 14 (1-indexed) = first site/group index
-            site_index = int(sin_fields[13]) if len(sin_fields) > 13 else -1
-        except (ProtocolError, ValueError, IndexError) as e:
-            self.log_line.emit(f"  Warning: could not read site index from SIN: {e}")
+        if sys.trunk_frequencies:
+            try:
+                site_index = proto.append_site(int(sys_index), site_type_str)
+                self.log_line.emit(f"  Created trunk site (AST) → index {site_index}")
+            except ProtocolError as e:
+                self.log_line.emit(f"  Warning: AST (create site) error: {e}")
 
         if site_index > 0 and sys.trunk_frequencies:
+            # Configure site via SIF (sets name, modulation, etc.)
+            # BCT15X SIF SET (FreeSCAN bln15XT format):
+            #   name,qk,hld,lout,mod,att,con_ch,[empty],[empty],start_key,
+            #   lat,lon,range,gps,state,STD,,
+            # The two empty fields between con_ch and start_key come from
+            # FreeSCAN's strCMD(1) ending with ",," and strCMD(2) starting with ","
+            site_name = "".join(c for c in (sys.name or "").strip() if c in _safe)[:16].strip()
+            try:
+                proto.set_site_info(
+                    site_index,
+                    site_name, ".", "0", "0",         # name, qk, hld, lout
+                    "AUTO", "0", "0", "", "",           # mod, att, con_ch, empty, empty
+                    ".",                                 # start_key
+                    "00000000N", "00000000E", "", "0",  # lat, lon, range, gps
+                    "00",                               # state
+                    "STD", "",                          # site_type, trailing
+                )
+            except ProtocolError as e:
+                self.log_line.emit(f"  Warning: SIF error: {e}")
+
             self.log_line.emit(f"  Uploading {len(sys.trunk_frequencies)} trunk frequency(ies) to site {site_index}")
             for tf in sys.trunk_frequencies:
                 if self._abort:
@@ -459,15 +481,18 @@ class _UploadWorker(QThread):
                     self.log_line.emit(f"    ERROR allocating trunk freq: {e}")
                     continue
 
-                # TFQ SET (FreeSCAN BCT15X format): freq_x10000, lcn, lockout
+                # TFQ SET (BCT15X format): freq_x10000,lcn,lout
+                # BCT15X uses 3-field format: no record/numtag/vol_offset (those
+                # are BCD996XT extensions).  LCN 0 is invalid; auto-increment from 1.
+                lcn = tf.lcn or "0"
                 try:
-                    proto.set_trunk_freq(
+                    tfq_resp = proto.set_trunk_freq(
                         freq_idx,
                         str(freq_int),
-                        tf.lcn or "0",
+                        lcn,
                         "1" if tf.lockout else "0",
                     )
-                    self.log_line.emit(f"    TF {freq_raw:.4f} MHz  LCN {tf.lcn or '0'}")
+                    self.log_line.emit(f"    TF {freq_raw:.4f} MHz  LCN {lcn}  [TFQ idx={freq_idx} resp={tfq_resp!r}]")
                 except ProtocolError as e:
                     self.log_line.emit(f"    Warning: TFQ error: {e}")
 
@@ -509,9 +534,11 @@ class _UploadWorker(QThread):
                     continue
 
                 tg_name = "".join(c for c in (tg.name or "").strip() if c in _safe)[:16].strip()
-                # TIN SET format: NAME,TGID,LOUT,PRI,ALT,ALTL,RECORD,AUDIO_TYPE,...
+                # TIN SET (BCT15X format): NAME,TGID,LOUT,PRI,ALT,ALTL
+                # BCT15X uses 6-field format (FreeSCAN Bln246=False path).
+                # BCD996XT adds AUDIO_TYPE, RECORD, NUMTAG, etc. — not for BCT15X.
                 try:
-                    proto.set_tgid(
+                    tin_resp = proto.set_tgid(
                         tgid_idx,
                         tg_name,
                         tg.tgid or "0",
@@ -519,10 +546,8 @@ class _UploadWorker(QThread):
                         "1" if tg.priority else "0",
                         tg.alert_tone or "0",
                         tg.alert_level or "0",
-                        "1" if tg.record else "0",   # RECORD (before AUDIO_TYPE)
-                        tg.audio_type or "0",
                     )
-                    self.log_line.emit(f"    TGID {tg.tgid}  {tg_name}")
+                    self.log_line.emit(f"    TGID {tg.tgid}  {tg_name}  [TIN idx={tgid_idx} resp={tin_resp!r}]")
                     tg_count += 1
                 except ProtocolError as e:
                     self.log_line.emit(f"    Warning: TIN error: {e}")

@@ -271,8 +271,16 @@ def load(path: str | Path) -> ScannerConfig:
                     ch.name, ch.group_id,
                 )
 
-    # Assign trunk frequencies to systems via group_id
-    sys_id_map: dict[str, System] = {s.group_id: s for s in config.systems if s.group_id}
+    # Assign trunk frequencies to systems via group_id.
+    # Trunk freqs in the TrunkSection carry the site group's group_id (group_type="3"),
+    # not the system's group_id — so include site groups in the lookup map too.
+    sys_id_map: dict[str, System] = {}
+    for s in config.systems:
+        if s.group_id:
+            sys_id_map[s.group_id] = s
+        for grp in s.groups:
+            if grp.group_id and grp.group_type == "3":  # site group
+                sys_id_map[grp.group_id] = s
     for tf in config.trunk_frequencies:
         sys = sys_id_map.get(tf.group_id)
         if sys:
@@ -417,8 +425,16 @@ def save(config: ScannerConfig, path: str | Path | None = None) -> None:
                 w(grp_raw[s])
 
     # Trunk section
-    # Flatten all trunk frequencies from all systems
+    # Collect trunk freqs from global pool plus any in sys.trunk_frequencies
+    # (the latter occur after a scanner download where freqs were added directly
+    # to sys.trunk_frequencies without going through config.trunk_frequencies).
+    seen_ids = {id(tf) for tf in config.trunk_frequencies}
     all_trunk: list[TrunkFrequency] = list(config.trunk_frequencies)
+    for sys in config.systems:
+        for tf in sys.trunk_frequencies:
+            if id(tf) not in seen_ids:
+                all_trunk.append(tf)
+                seen_ids.add(id(tf))
     w("TrunkSection")
     w_int(len(all_trunk))
     for tf in all_trunk:

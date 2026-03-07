@@ -236,7 +236,7 @@ class _DownloadWorker(QThread):
 
             elif sys_obj.is_motorola:
                 ch_count += self._download_motorola_system(
-                    proto, sys_obj, sys_index, first_grp_index_field
+                    proto, sys_obj, sys_index, first_grp_index_field, config
                 )
 
             config.systems.append(sys_obj)
@@ -276,10 +276,12 @@ class _DownloadWorker(QThread):
         sys_obj: System,
         sys_index: int,
         first_site_field: str,
+        config: "ScannerConfig",
     ) -> int:
         """
         Download sites/trunk-freqs and TGID groups/talk-groups for a Motorola system.
         Populates sys_obj.groups and sys_obj.trunk_frequencies in place.
+        Also appends trunk freqs to config.trunk_frequencies for .996 file save.
         Returns the number of talk groups downloaded.
         """
         tg_count = 0
@@ -291,14 +293,17 @@ class _DownloadWorker(QThread):
             self.log_line.emit(f"  TRN error: {e}")
             return 0
 
-        self.log_line.emit(f"  TRN raw ({len(trn)} fields): {','.join(trn[:20])}")
+        self.log_line.emit(f"  TRN raw ({len(trn)} fields): {','.join(trn[:25])}")
         self.log_line.emit(f"  SIN field[13] (first site/group head): {first_site_field}")
+        self.log_line.emit(f"  TRN[20] (TGID_GRP_HEAD candidate): {trn[20] if len(trn) > 20 else '<missing>'}")
 
         # TRN GET response field indices (0-based, after command prefix stripped):
         # [0]=ID_SEARCH [1]=S_BIT [2]=END_CODE [3]=AFS [4-5]=RSV [6]=EMG [7]=EMGL
-        # [8]=FMAP [9]=CTM_FMAP [10-17]=8×RSV
-        # [18]=TGID_GRP_HEAD [19]=TGID_GRP_TAIL [20]=ID_LOUT_GRP_HEAD [21]=ID_LOUT_GRP_TAIL
-        # [22]=MOT_ID [23]=EMG_COLOR [24]=EMG_PATTERN [25]=P25NAC [26]=PRI_ID_SCAN
+        # [8]=FMAP [9]=CTM_FMAP [10-18]=band plan (base/step/offset × 3 groups) [19]=DIG_END_CODE
+        # [20]=TGID_GRP_HEAD [21]=TGID_GRP_TAIL [22]=ID_LOUT_GRP_HEAD [23]=ID_LOUT_GRP_TAIL
+        # [24..28]=MOT_ID/EMG_COLOR/EMG_PATTERN/P25NAC/PRI_ID_SCAN (approx; not all verified)
+        # BCT15X has band plan at [10-18], pushing TGID_GRP_HEAD to [20].
+        # Confirmed: FreeSCAN ParaParse(TRN,21) = 1-indexed pos 21 = 0-indexed [20].
         def _f(fields: list[str], i: int) -> str:
             return fields[i].strip() if i < len(fields) else ""
 
@@ -357,6 +362,7 @@ class _DownloadWorker(QThread):
 
                 # TFQ fields (0-based): [0]=FREQ, [1]=LCN, [2]=LOUT,
                 #   [3]=REV_INDEX, [4]=FWD_INDEX
+                self.log_line.emit(f"    TFQ raw ({len(tfq)} fields): {','.join(tfq[:8])}")
                 freq_raw = _f(tfq, 0)
                 lcn = _f(tfq, 1)
                 tf_lockout = _f(tfq, 2)
@@ -375,8 +381,10 @@ class _DownloadWorker(QThread):
                 tf.frequency = freq_str
                 tf.lcn = lcn
                 tf.lockout = tf_lockout == "1"
-                tf.group_id = site_grp.group_id
+                # Use sys_obj.group_id so the .996 TrunkSection can link back to system
+                tf.group_id = sys_obj.group_id
                 sys_obj.trunk_frequencies.append(tf)
+                config.trunk_frequencies.append(tf)
 
                 self.log_line.emit(f"    TF {freq_str} MHz  LCN {lcn}")
                 tfq_idx = next_tfq_idx
@@ -386,7 +394,7 @@ class _DownloadWorker(QThread):
 
         # --- TGID groups → talk groups ---
         try:
-            tgid_grp_idx = int(_f(trn, 18))
+            tgid_grp_idx = int(_f(trn, 20))
         except ValueError:
             tgid_grp_idx = -1
 
@@ -428,6 +436,7 @@ class _DownloadWorker(QThread):
                 # TIN GET response (0-based): [0]=NAME [1]=TGID [2]=LOUT [3]=PRI
                 #   [4]=ALT [5]=ALTL [6]=REV_INDEX [7]=FWD_INDEX [8]=SYS_INDEX
                 #   [9]=GRP_INDEX [10]=RECORD [11]=AUDIO_TYPE [12]=NUMBER_TAG ...
+                self.log_line.emit(f"    TIN raw ({len(tin)} fields): {','.join(tin[:12])}")
                 tg_name = _f(tin, 0)
                 tgid = _f(tin, 1)
                 tg_lockout = _f(tin, 2)
