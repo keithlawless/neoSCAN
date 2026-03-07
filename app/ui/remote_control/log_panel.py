@@ -156,14 +156,17 @@ class LogPanel(QWidget):
         manager.transcription_ready.connect(self._on_transcription_ready)
 
     def _on_transcription_ready(self, row_index: int, text: str, job) -> None:
-        if row_index < 0 or row_index >= len(self._entries):
-            return
-        entry = self._entries[row_index]
-        entry.transcript = text
-        entry.transcript_pending = False
-        self._refresh_row(row_index)
-        if self._transcription_manager:
-            self._transcription_manager.on_transcription_done(row_index, text, job)
+        try:
+            if row_index < 0 or row_index >= len(self._entries):
+                return
+            entry = self._entries[row_index]
+            entry.transcript = text
+            entry.transcript_pending = False
+            self._refresh_row(row_index)
+            if self._transcription_manager:
+                self._transcription_manager.on_transcription_done(row_index, text, job)
+        except Exception:
+            log.exception("Error handling transcription result for row %d", row_index)
 
     def _set_controls(self, connected: bool, logging: bool) -> None:
         self._start_btn.setEnabled(connected and not logging)
@@ -200,35 +203,35 @@ class LogPanel(QWidget):
             return
         try:
             info = self._proto.get_received_channel_info()
-        except ProtocolError:
-            return
 
-        if info:
-            self.channel_info_updated.emit(info)
-            if self._logging:
-                if self._active is None:
-                    # New transmission started
-                    entry = _TransmissionEntry(info)
-                    self._entries.append(entry)
-                    self._active = entry
-                    self._add_table_row(entry)
-                    self._set_controls(connected=True, logging=True)
+            if info:
+                self.channel_info_updated.emit(info)
+                if self._logging:
+                    if self._active is None:
+                        # New transmission started
+                        entry = _TransmissionEntry(info)
+                        self._entries.append(entry)
+                        self._active = entry
+                        self._add_table_row(entry)
+                        self._set_controls(connected=True, logging=True)
+                        if self._transcription_manager:
+                            self._transcription_manager.on_transmission_started()
+                    else:
+                        # Ongoing transmission — update duration in place
+                        self._refresh_row(len(self._entries) - 1)
+            else:
+                if self._logging and self._active is not None:
+                    # Transmission ended
+                    self._active.end_time = datetime.now()
+                    row_index = len(self._entries) - 1
                     if self._transcription_manager:
-                        self._transcription_manager.on_transmission_started()
-                else:
-                    # Ongoing transmission — update duration in place
-                    self._refresh_row(len(self._entries) - 1)
-        else:
-            if self._logging and self._active is not None:
-                # Transmission ended
-                self._active.end_time = datetime.now()
-                row_index = len(self._entries) - 1
-                if self._transcription_manager:
-                    self._active.transcript_pending = True
-                self._refresh_row(row_index)
-                if self._transcription_manager:
-                    self._transcription_manager.on_transmission_ended(row_index, self._active)
-                self._active = None
+                        self._active.transcript_pending = True
+                    self._refresh_row(row_index)
+                    if self._transcription_manager:
+                        self._transcription_manager.on_transmission_ended(row_index, self._active)
+                    self._active = None
+        except Exception:
+            log.exception("Error in poll — stopping timer")
 
     def _add_table_row(self, entry: _TransmissionEntry) -> None:
         row = self._table.rowCount()

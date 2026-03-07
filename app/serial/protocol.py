@@ -165,7 +165,7 @@ class ScannerProtocol:
         """
         try:
             payload = self.send_command("GLG")
-        except ProtocolError:
+        except Exception:
             return None
         if not payload or payload.startswith("NG"):
             return None
