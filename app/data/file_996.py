@@ -328,21 +328,12 @@ def _build_channel(raw: list[str]) -> Channel | TalkGroup:
     group_id = raw[10]
     name = raw[1]
     # Determine if this is a conventional channel (raw[2] looks like a frequency)
-    # or a trunked talk group (raw[2] is a TGID / integer string)
+    # or a trunked talk group (raw[2] is a TGID / integer string).
+    # Frequencies in .996 files always contain a decimal point (e.g. "154.2350").
+    # TGIDs are plain integers (e.g. "33776"), so the decimal point is the reliable
+    # discriminator — the old "< 25" threshold failed for Motorola Type II TGIDs.
     freq_or_tgid = raw[2]
-    try:
-        float(freq_or_tgid)
-        is_conv = True
-    except (ValueError, TypeError):
-        is_conv = bool(freq_or_tgid)
-
-    # Heuristic: if frequency parses as a float > 25, treat as conventional
-    if is_conv:
-        try:
-            if float(freq_or_tgid) < 25:
-                is_conv = False  # likely a TGID
-        except (ValueError, TypeError):
-            is_conv = False
+    is_conv = bool(freq_or_tgid) and "." in freq_or_tgid
 
     if is_conv:
         ch = Channel()
