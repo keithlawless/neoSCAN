@@ -368,6 +368,21 @@ class _UploadWorker(QThread):
         except ProtocolError as e:
             self.log_line.emit(f"\nWarning: EPG error: {e}")
 
+        # After leaving program mode the scanner may sit on the last channel
+        # it touched.  Wait for it to fully exit program mode then send SCAN.
+        try:
+            import time as _time
+            _time.sleep(1.5)   # scanner needs time to finish EPG transition
+            proto.send_key("S")
+            self.log_line.emit("Sent SCAN key — scanner is now scanning.")
+        except ProtocolError:
+            self.log_line.emit(
+                "Note: Could not send SCAN key. Press SCAN on the scanner to start."
+            )
+
+        self.progress.emit(100)
+        self.finished_ok.emit(sys_count, ch_count)
+
     def _upload_motorola_system(
         self,
         proto: ScannerProtocol,
@@ -384,61 +399,52 @@ class _UploadWorker(QThread):
         tg_count = 0
 
         # --- TRN: trunking parameters ---
-        # TRN SET format (fields after sys_index, 0-based from protocol spec):
-        #   id_search, status_bit, end_code, i_call, emg_alert, apco_mode,
-        #   fmap, ctm_fmap, p25_nac, mot_id, pri_id_scan
+        # FreeSCAN TRN SET format for BCT15X (Motorola Type II / M82S):
+        #   TRN,<sys>,<id_mode>,<status_bit>,<end_code>,<edacs_fmt=0>,
+        #       <i_call>,<con_ch=0>,<emg_alert_type>,<emg_alert_level>,
+        #       <fleet_map>,<custom_fleet_map>,
+        #       <base0>,<mstep0>,<offset0>,<base1>,<mstep1>,<offset1>,
+        #       <base2>,<mstep2>,<offset2>,<dig_code=0>
         try:
+            fmap = sys.fleet_map or "16"
+            ctm = sys.custom_fleet_map or ""
+            emg_level = sys.emg_alert_level or "1"
+            emg_type = "0"  # numeric index; NONE=0
             proto.set_trunking_params(
                 int(sys_index),
-                sys.id_search or "0",
-                "1" if sys.ignore_status_bit else "0",
-                "1" if sys.end_code else "0",
-                "1" if sys.icall else "0",
-                sys.emg_alert_type or "NONE",
-                sys.apco_mode or "AUTO",
-                sys.fleet_map or "16",
-                sys.custom_fleet_map or "",
-                sys.p25_nac or "SRCH",
-                sys.mot_id or "0",
-                sys.pri_id_scan or "0",
+                sys.id_search or "0",           # id_mode
+                "1" if sys.ignore_status_bit else "0",  # status_bit
+                "1" if sys.end_code else "0",   # end_code
+                "0",                            # edacs_format (0 for Motorola)
+                "1" if sys.icall else "0",      # i_call
+                "0",                            # con_ch (control channel — 0=auto)
+                emg_type,                       # emg_alert_type
+                emg_level,                      # emg_alert_level
+                fmap,                           # fleet_map preset (1-16)
+                ctm,                            # custom fleet map
+                "0", "0", "0",                  # base/mstep/offset band plan group 0
+                "0", "0", "0",                  # band plan group 1
+                "0", "0", "0",                  # band plan group 2
+                "0",                            # dig_code
             )
         except ProtocolError as e:
             self.log_line.emit(f"  Warning: TRN error: {e}")
 
-        # --- Sites (group_type == "3") → trunk frequencies ---
-        site_groups = [g for g in sys.groups if g.is_site]
-        for site in site_groups:
-            if self._abort:
-                break
-            site_name = "".join(c for c in (site.name or "").strip() if c in _safe)[:16].strip()
-            self.log_line.emit(f"  [Site] {site_name}")
+        # --- Trunk frequencies ---
+        # CSY,MOT auto-creates the first site. Read SIN field[13] (0-indexed)
+        # to get that site's scanner index, then use ACC,<site_index> / TFQ.
+        # FreeSCAN never uses AST; it creates additional sites via additional CSY calls.
+        site_index = -1
+        try:
+            sin_fields = proto.get_system_info(int(sys_index))
+            # field[13] (0-indexed) = position 14 (1-indexed) = first site/group index
+            site_index = int(sin_fields[13]) if len(sin_fields) > 13 else -1
+        except (ProtocolError, ValueError, IndexError) as e:
+            self.log_line.emit(f"  Warning: could not read site index from SIN: {e}")
 
-            try:
-                site_idx = proto.append_site(int(sys_index))
-            except ProtocolError as e:
-                self.log_line.emit(f"    ERROR creating site: {e}")
-                continue
-
-            # SIF SET: name, quick_key, hold, lockout, bandwidth(AUTO), ...
-            try:
-                proto.set_site_info(
-                    site_idx,
-                    site_name,
-                    site.quick_key or ".",
-                    "2",                          # hold time
-                    "1" if site.lockout else "0",
-                    "AUTO",                       # bandwidth
-                    "", "",                       # RSV
-                )
-            except ProtocolError as e:
-                self.log_line.emit(f"    Warning: SIF error: {e}")
-
-            # Trunk frequencies belonging to this site (linked by group_id)
-            site_freqs = [
-                tf for tf in sys.trunk_frequencies
-                if tf.group_id == site.group_id
-            ]
-            for tf in site_freqs:
+        if site_index > 0 and sys.trunk_frequencies:
+            self.log_line.emit(f"  Uploading {len(sys.trunk_frequencies)} trunk frequency(ies) to site {site_index}")
+            for tf in sys.trunk_frequencies:
                 if self._abort:
                     break
                 try:
@@ -448,23 +454,20 @@ class _UploadWorker(QThread):
                     continue
 
                 try:
-                    freq_idx = proto.add_trunk_freq(site_idx)
+                    freq_idx = proto.add_trunk_freq(site_index)
                 except ProtocolError as e:
                     self.log_line.emit(f"    ERROR allocating trunk freq: {e}")
                     continue
 
-                # TFQ SET: freq_x10000, lcn, lockout, record, number_tag, vol_offset
+                # TFQ SET (FreeSCAN BCT15X format): freq_x10000, lcn, lockout
                 try:
                     proto.set_trunk_freq(
                         freq_idx,
                         str(freq_int),
                         tf.lcn or "0",
                         "1" if tf.lockout else "0",
-                        "1" if tf.record else "0",
-                        tf.number_tag or "NONE",
-                        tf.volume_offset or "0",
                     )
-                    self.log_line.emit(f"    TF {freq_raw:.4f} MHz  LCN {tf.lcn}")
+                    self.log_line.emit(f"    TF {freq_raw:.4f} MHz  LCN {tf.lcn or '0'}")
                 except ProtocolError as e:
                     self.log_line.emit(f"    Warning: TFQ error: {e}")
 
@@ -506,8 +509,8 @@ class _UploadWorker(QThread):
                     continue
 
                 tg_name = "".join(c for c in (tg.name or "").strip() if c in _safe)[:16].strip()
-                # TIN SET: name, tgid, lockout, priority, alert_tone, alert_level,
-                #          audio_type, record, number_tag, volume_offset
+                # TIN SET (FreeSCAN BCT15X format):
+                #   name, tgid, lockout, priority, alert_tone, alert_level, audio_type
                 try:
                     proto.set_tgid(
                         tgid_idx,
@@ -518,9 +521,6 @@ class _UploadWorker(QThread):
                         tg.alert_tone or "0",
                         tg.alert_level or "0",
                         tg.audio_type or "0",
-                        "1" if tg.record else "0",
-                        tg.number_tag or "NONE",
-                        tg.volume_offset or "0",
                     )
                     self.log_line.emit(f"    TGID {tg.tgid}  {tg_name}")
                     tg_count += 1
@@ -528,21 +528,6 @@ class _UploadWorker(QThread):
                     self.log_line.emit(f"    Warning: TIN error: {e}")
 
         return tg_count
-
-        # After leaving program mode the scanner may sit on the last channel
-        # it touched.  Wait for it to fully exit program mode then send SCAN.
-        try:
-            import time as _time
-            _time.sleep(1.5)   # scanner needs time to finish EPG transition
-            proto.send_key("S")
-            self.log_line.emit("Sent SCAN key — scanner is now scanning.")
-        except ProtocolError:
-            self.log_line.emit(
-                "Note: Could not send SCAN key. Press SCAN on the scanner to start."
-            )
-
-        self.progress.emit(100)
-        self.finished_ok.emit(sys_count, ch_count)
 
 
 class UploadDialog(QDialog):
