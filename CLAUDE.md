@@ -266,17 +266,7 @@ and editing; `_raw` is used only for serialisation.
 | 4 — CSV import | Complete | Fuzzy field mapping, 4-step wizard |
 | 5 — Upload/download | Complete | Bug-fixed; see commit cd4d957 |
 | 6 — Remote control | Complete | Keypad, transmission log, CSV export |
-| 7 — Polish & packaging | Not started | See below |
-
-### Phase 7 remaining work
-
-- **PyInstaller packaging** — produce single-file executables for macOS,
-  Windows, Linux. A `.spec` file will be needed; test on each platform.
-- **App icon** — add to `resources/icons/` and wire into `QApplication`.
-- **App preferences dialog** — default port, log save path, auto-connect,
-  light/dark theme. Use `QSettings` for persistence.
-- **GPL license file** — fetch from `https://www.gnu.org/licenses/gpl-3.0.txt`
-  and save as `LICENSE`, then commit.
+| 7 — Polish & packaging | Complete | .spec, icons, prefs dialog (auto-connect + theme), GPL license |
 
 ### Suggested future features
 

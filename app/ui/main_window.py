@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 
 import serial
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtWidgets import (
     QFileDialog,
@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
 from app.serial import port_manager
 from app.serial.protocol import ScannerProtocol, ProtocolError
 from app.ui.settings.settings_dialog import ConnectionSettingsDialog
-from app.ui.settings.preferences_dialog import PreferencesDialog
+from app.ui.settings.preferences_dialog import PreferencesDialog, load_prefs, apply_theme
 from app.ui.editor.systems_panel import SystemsPanel
 from app.ui.editor.channel_editor import ChannelEditorPanel
 from app.ui.editor.csv_import_dialog import CSVImportDialog
@@ -80,6 +80,13 @@ class MainWindow(QMainWindow):
         self._update_connection_ui()
         self._update_title()
         self._transcription_manager.apply_settings()
+
+        # Auto-connect if the user has enabled it in preferences.
+        settings = load_prefs()
+        if settings.value("serial/auto_connect", False, type=bool):
+            port = settings.value("serial/default_port", "")
+            if port:
+                QTimer.singleShot(500, lambda: self._start_connect(port))
 
     # ------------------------------------------------------------------
     # Menu
@@ -414,7 +421,10 @@ class MainWindow(QMainWindow):
         port_name = dlg.selected_port
         if not port_name:
             return
+        self._start_connect(port_name)
 
+    def _start_connect(self, port_name: str) -> None:
+        """Begin an async connection attempt to the named serial port."""
         self.statusBar().showMessage(f"Connecting to {port_name}…")
         self._connect_action.setEnabled(False)
 
@@ -510,6 +520,8 @@ class MainWindow(QMainWindow):
     def _on_preferences(self) -> None:
         dlg = PreferencesDialog(parent=self)
         if dlg.exec():
+            settings = load_prefs()
+            apply_theme(settings.value("appearance/theme", "System default"))
             self._transcription_manager.apply_settings()
 
     def _on_about(self) -> None:

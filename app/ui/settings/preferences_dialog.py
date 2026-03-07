@@ -32,6 +32,51 @@ def load_prefs() -> QSettings:
     return QSettings(_ORG, _APP)
 
 
+def apply_theme(theme: str) -> None:
+    """
+    Apply the named theme to the running QApplication instance.
+
+    "Dark"  — Fusion style with a dark palette.
+    "Light" — Fusion style with the default (light) palette.
+    "System default" — no override; uses the platform native style.
+                       Only effective on first launch before the window is shown;
+                       switching back to it at runtime requires an app restart.
+    """
+    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtGui import QPalette, QColor
+
+    app = QApplication.instance()
+    if app is None:
+        return
+
+    if theme == "Dark":
+        app.setStyle("Fusion")
+        p = QPalette()
+        p.setColor(QPalette.ColorRole.Window,          QColor(53, 53, 53))
+        p.setColor(QPalette.ColorRole.WindowText,      QColor(255, 255, 255))
+        p.setColor(QPalette.ColorRole.Base,            QColor(35, 35, 35))
+        p.setColor(QPalette.ColorRole.AlternateBase,   QColor(53, 53, 53))
+        p.setColor(QPalette.ColorRole.ToolTipBase,     QColor(53, 53, 53))
+        p.setColor(QPalette.ColorRole.ToolTipText,     QColor(255, 255, 255))
+        p.setColor(QPalette.ColorRole.Text,            QColor(255, 255, 255))
+        p.setColor(QPalette.ColorRole.Button,          QColor(53, 53, 53))
+        p.setColor(QPalette.ColorRole.ButtonText,      QColor(255, 255, 255))
+        p.setColor(QPalette.ColorRole.BrightText,      QColor(255, 0, 0))
+        p.setColor(QPalette.ColorRole.Link,            QColor(42, 130, 218))
+        p.setColor(QPalette.ColorRole.Highlight,       QColor(42, 130, 218))
+        p.setColor(QPalette.ColorRole.HighlightedText, QColor(0, 0, 0))
+        p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text,
+                   QColor(128, 128, 128))
+        p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText,
+                   QColor(128, 128, 128))
+        p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText,
+                   QColor(128, 128, 128))
+        app.setPalette(p)
+    elif theme == "Light":
+        app.setStyle("Fusion")
+        app.setPalette(QPalette())
+
+
 class PreferencesDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)

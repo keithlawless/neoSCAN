@@ -24,6 +24,7 @@ if sys.platform == "darwin":
         pass  # pyobjc not installed — name stays as "Python" in dev; fine in packaged app
 
 from app.ui.main_window import MainWindow
+from app.ui.settings.preferences_dialog import load_prefs, apply_theme
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -42,6 +43,10 @@ def main() -> None:
 
     if _ICON_PATH.exists():
         app.setWindowIcon(QIcon(str(_ICON_PATH)))
+
+    # Apply saved theme before the window is shown so colours are consistent
+    # from the first paint.
+    apply_theme(load_prefs().value("appearance/theme", "System default"))
 
     window = MainWindow()
     window.show()
