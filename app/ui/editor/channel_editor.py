@@ -20,12 +20,16 @@ from PyQt6.QtWidgets import (
     QFrame,
     QTextEdit,
     QSpacerItem,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
 )
 
 from app.data.models import (
-    ScannerConfig, System, Group, Channel, TalkGroup,
+    ScannerConfig, System, Group, Channel, TalkGroup, TrunkFrequency,
     SYSTEM_TYPE_NAMES, SYS_TYPE_CONVENTIONAL,
 )
+import uuid
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +191,8 @@ class ChannelEditorPanel(QWidget):
     immediately (no Apply button needed).
     """
 
-    modified = pyqtSignal()  # emitted whenever a field changes
+    modified = pyqtSignal()           # emitted whenever a field changes
+    structure_changed = pyqtSignal()  # emitted when items are added/removed
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -233,14 +238,21 @@ class ChannelEditorPanel(QWidget):
     def show_group(self, config: ScannerConfig, s_idx: int, g_idx: int) -> None:
         self._config = config
         self._context = ("group", s_idx, g_idx, None)
-        grp = config.systems[s_idx].groups[g_idx]
-        self._build_group_form(grp, s_idx, g_idx)
+        sys_obj = config.systems[s_idx]
+        grp = sys_obj.groups[g_idx]
+        if sys_obj.is_motorola and not grp.is_site:
+            self._build_tgid_group_form(grp, s_idx, g_idx)
+        else:
+            self._build_group_form(grp, s_idx, g_idx)
 
     def show_system(self, config: ScannerConfig, s_idx: int) -> None:
         self._config = config
         self._context = ("system", s_idx, None, None)
         sys = config.systems[s_idx]
-        self._build_system_form(sys, s_idx)
+        if sys.is_motorola:
+            self._build_trunked_system_form(sys, s_idx)
+        else:
+            self._build_system_form(sys, s_idx)
 
     def clear(self) -> None:
         self._config = None
@@ -426,6 +438,370 @@ class ChannelEditorPanel(QWidget):
         info = QLabel(f"Group ID: {grp.group_id}\nChannels: {len(grp.channels)}")
         info.setStyleSheet("color: gray; font-size: 11px; padding: 4px;")
         layout.addWidget(info)
+
+    def _build_trunked_system_form(self, sys: System, s_idx: int) -> None:
+        """Form for a Motorola trunked system: parameters + trunk frequency table."""
+        self._clear_form()
+        self._title.setText(f"System: {sys.name or '(unnamed)'}  [Motorola]")
+        layout = QVBoxLayout(self._form_container)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        # ---- Trunking parameters ----
+        params_box = QGroupBox("Trunking Parameters")
+        form = QFormLayout(params_box)
+
+        e_name = QLineEdit(sys.name)
+        e_name.setMaxLength(16)
+        e_name.textChanged.connect(lambda v: self._set_system_field(s_idx, "name", v))
+        e_name.textChanged.connect(lambda v: self._title.setText(f"System: {v or '(unnamed)'}  [Motorola]"))
+        form.addRow("System Name:", e_name)
+
+        qk_row, _ = self._qk_row(
+            sys.quick_key,
+            lambda v: self._set_system_field(s_idx, "quick_key", v or "."),
+            self._used_system_qks,
+        )
+        form.addRow("Quick Key:", qk_row)
+
+        e_hold = QLineEdit(sys.hold_time)
+        e_hold.setPlaceholderText("tenths of a second")
+        e_hold.textChanged.connect(lambda v: self._set_system_field(s_idx, "hold_time", v))
+        form.addRow("Hold Time:", e_hold)
+
+        e_delay = QLineEdit(sys.delay_time)
+        e_delay.setPlaceholderText("seconds")
+        e_delay.textChanged.connect(lambda v: self._set_system_field(s_idx, "delay_time", v))
+        form.addRow("Delay Time:", e_delay)
+
+        c_id_search = QComboBox()
+        c_id_search.addItem("ID Scan", userData="0")
+        c_id_search.addItem("ID Search", userData="1")
+        idx = c_id_search.findData(sys.id_search or "0")
+        c_id_search.setCurrentIndex(idx if idx >= 0 else 0)
+        c_id_search.currentIndexChanged.connect(
+            lambda _: self._set_system_field(s_idx, "id_search", c_id_search.currentData())
+        )
+        form.addRow("ID Search Mode:", c_id_search)
+
+        c_sbit = QComboBox()
+        c_sbit.addItem("Ignore", userData=False)
+        c_sbit.addItem("Yes", userData=True)
+        c_sbit.setCurrentIndex(1 if sys.ignore_status_bit else 0)
+        c_sbit.currentIndexChanged.connect(
+            lambda _: self._set_system_field(s_idx, "ignore_status_bit", c_sbit.currentData())
+        )
+        form.addRow("Status Bit:", c_sbit)
+
+        c_end = QComboBox()
+        c_end.addItem("Ignore", userData=False)
+        c_end.addItem("Analog", userData=True)
+        c_end.setCurrentIndex(1 if sys.end_code else 0)
+        c_end.currentIndexChanged.connect(
+            lambda _: self._set_system_field(s_idx, "end_code", c_end.currentData())
+        )
+        form.addRow("End Code:", c_end)
+
+        # Fleet map: preset numbers 1–16 or Custom
+        c_fmap = QComboBox()
+        for i in range(1, 17):
+            c_fmap.addItem(f"Preset {i}", userData=str(i))
+        c_fmap.addItem("Custom", userData="0")
+        fmap_idx = c_fmap.findData(sys.fleet_map or "16")
+        c_fmap.setCurrentIndex(fmap_idx if fmap_idx >= 0 else c_fmap.count() - 1)
+
+        e_ctm_fmap = QLineEdit(sys.custom_fleet_map or "")
+        e_ctm_fmap.setPlaceholderText("8 hex digits (e.g. 00FFFFFF)")
+        e_ctm_fmap.setEnabled(sys.fleet_map == "0")
+        e_ctm_fmap.textChanged.connect(
+            lambda v: self._set_system_field(s_idx, "custom_fleet_map", v)
+        )
+
+        c_fmap.currentIndexChanged.connect(
+            lambda _: (
+                self._set_system_field(s_idx, "fleet_map", c_fmap.currentData()),
+                e_ctm_fmap.setEnabled(c_fmap.currentData() == "0"),
+            )
+        )
+        form.addRow("Fleet Map:", c_fmap)
+        form.addRow("Custom Fleet Map:", e_ctm_fmap)
+
+        c_mot_id = QComboBox()
+        c_mot_id.addItem("Decimal", userData="0")
+        c_mot_id.addItem("HEX", userData="1")
+        idx = c_mot_id.findData(sys.mot_id or "0")
+        c_mot_id.setCurrentIndex(idx if idx >= 0 else 0)
+        c_mot_id.currentIndexChanged.connect(
+            lambda _: self._set_system_field(s_idx, "mot_id", c_mot_id.currentData())
+        )
+        form.addRow("ID Display:", c_mot_id)
+
+        cb_lockout = QCheckBox("Locked out (skip this system)")
+        cb_lockout.setChecked(sys.lockout)
+        cb_lockout.toggled.connect(lambda v: self._set_system_field(s_idx, "lockout", v))
+        form.addRow("", cb_lockout)
+
+        layout.addWidget(params_box)
+
+        # ---- Trunk Frequencies table ----
+        tf_box = QGroupBox("Trunk Frequencies")
+        tf_vbox = QVBoxLayout(tf_box)
+
+        tf_table = QTableWidget(0, 3)
+        tf_table.setHorizontalHeaderLabels(["Frequency (MHz)", "LCN", "Lockout"])
+        tf_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        tf_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        tf_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        tf_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        tf_table.verticalHeader().setVisible(False)
+
+        # Populate rows
+        tf_table.blockSignals(True)
+        for tf in sys.trunk_frequencies:
+            row = tf_table.rowCount()
+            tf_table.insertRow(row)
+            tf_table.setItem(row, 0, QTableWidgetItem(tf.frequency))
+            tf_table.setItem(row, 1, QTableWidgetItem(tf.lcn))
+            cb_item = QTableWidgetItem()
+            cb_item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            cb_item.setCheckState(Qt.CheckState.Checked if tf.lockout else Qt.CheckState.Unchecked)
+            tf_table.setItem(row, 2, cb_item)
+        tf_table.blockSignals(False)
+
+        def _tf_changed(row: int, col: int) -> None:
+            if not self._config or row >= len(sys.trunk_frequencies):
+                return
+            tf = sys.trunk_frequencies[row]
+            if col == 0:
+                tf.frequency = tf_table.item(row, 0).text().strip()
+            elif col == 1:
+                tf.lcn = tf_table.item(row, 1).text().strip()
+            elif col == 2:
+                tf.lockout = tf_table.item(row, 2).checkState() == Qt.CheckState.Checked
+            self._config.modified = True
+            self.modified.emit()
+
+        tf_table.cellChanged.connect(_tf_changed)
+
+        def _tf_default_group_id() -> str:
+            """Return group_id of first site, creating one if needed."""
+            for grp in sys.groups:
+                if grp.is_site:
+                    return grp.group_id
+            # Create a default site group
+            site = Group()
+            site.name = "Site 1"
+            site.group_type = "3"
+            site.group_id = uuid.uuid4().hex[:16].upper()
+            sys.groups.append(site)
+            return site.group_id
+
+        def _add_tf() -> None:
+            if not self._config:
+                return
+            tf = TrunkFrequency()
+            tf.group_id = _tf_default_group_id()
+            sys.trunk_frequencies.append(tf)
+            row = tf_table.rowCount()
+            tf_table.blockSignals(True)
+            tf_table.insertRow(row)
+            tf_table.setItem(row, 0, QTableWidgetItem(""))
+            tf_table.setItem(row, 1, QTableWidgetItem("0"))
+            cb_item = QTableWidgetItem()
+            cb_item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            cb_item.setCheckState(Qt.CheckState.Unchecked)
+            tf_table.setItem(row, 2, cb_item)
+            tf_table.blockSignals(False)
+            tf_table.setCurrentCell(row, 0)
+            tf_table.editItem(tf_table.item(row, 0))
+            self._config.modified = True
+            self.modified.emit()
+
+        def _del_tf() -> None:
+            if not self._config:
+                return
+            rows = sorted(set(i.row() for i in tf_table.selectedItems()), reverse=True)
+            for r in rows:
+                if r < len(sys.trunk_frequencies):
+                    sys.trunk_frequencies.pop(r)
+                tf_table.removeRow(r)
+            self._config.modified = True
+            self.modified.emit()
+
+        tf_vbox.addWidget(tf_table)
+        btn_row = QHBoxLayout()
+        btn_add = QPushButton("Add Frequency")
+        btn_del = QPushButton("Delete Selected")
+        btn_add.clicked.connect(_add_tf)
+        btn_del.clicked.connect(_del_tf)
+        btn_row.addWidget(btn_add)
+        btn_row.addWidget(btn_del)
+        btn_row.addStretch()
+        tf_vbox.addLayout(btn_row)
+        layout.addWidget(tf_box)
+
+    def _build_tgid_group_form(self, grp: Group, s_idx: int, g_idx: int) -> None:
+        """Form for a TGID group in a Motorola system: name/QK/lockout + talk group table."""
+        self._clear_form()
+        self._title.setText(f"TGID Group: {grp.name or '(unnamed)'}")
+        layout = QVBoxLayout(self._form_container)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        # ---- Group settings ----
+        grp_box = QGroupBox("Group Settings")
+        form = QFormLayout(grp_box)
+
+        e_name = QLineEdit(grp.name)
+        e_name.setMaxLength(16)
+        e_name.textChanged.connect(lambda v: self._set_group_field(s_idx, g_idx, "name", v))
+        e_name.textChanged.connect(lambda v: self._title.setText(f"TGID Group: {v or '(unnamed)'}"))
+        form.addRow("Group Name:", e_name)
+
+        qk_row, _ = self._qk_row(
+            grp.quick_key,
+            lambda v: self._set_group_field(s_idx, g_idx, "quick_key", v or "."),
+            self._used_group_qks,
+        )
+        form.addRow("Quick Key:", qk_row)
+
+        cb_lockout = QCheckBox("Locked out")
+        cb_lockout.setChecked(grp.lockout)
+        cb_lockout.toggled.connect(lambda v: self._set_group_field(s_idx, g_idx, "lockout", v))
+        form.addRow("", cb_lockout)
+
+        layout.addWidget(grp_box)
+
+        # ---- Talk groups table ----
+        tg_box = QGroupBox("Talk Groups")
+        tg_vbox = QVBoxLayout(tg_box)
+
+        tg_table = QTableWidget(0, 5)
+        tg_table.setHorizontalHeaderLabels(["TGID", "Name", "Priority", "Lockout", "Audio Type"])
+        tg_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        tg_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        tg_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        tg_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        tg_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        tg_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        tg_table.verticalHeader().setVisible(False)
+
+        _audio_type_labels = ["All", "Analog Only", "Digital Only"]
+
+        def _tg_audio_combo(current: str) -> QComboBox:
+            c = QComboBox()
+            for i, label in enumerate(_audio_type_labels):
+                c.addItem(label, userData=str(i))
+            idx = c.findData(current or "0")
+            c.setCurrentIndex(idx if idx >= 0 else 0)
+            return c
+
+        def _populate_tg_table() -> None:
+            tg_table.blockSignals(True)
+            tg_table.setRowCount(0)
+            for row, tg in enumerate(grp.channels):
+                if not isinstance(tg, TalkGroup):
+                    continue
+                tg_table.insertRow(row)
+                tg_table.setItem(row, 0, QTableWidgetItem(tg.tgid))
+                tg_table.setItem(row, 1, QTableWidgetItem(tg.name))
+                pri_item = QTableWidgetItem()
+                pri_item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+                pri_item.setCheckState(Qt.CheckState.Checked if tg.priority else Qt.CheckState.Unchecked)
+                tg_table.setItem(row, 2, pri_item)
+                lout_item = QTableWidgetItem()
+                lout_item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+                lout_item.setCheckState(Qt.CheckState.Checked if tg.lockout else Qt.CheckState.Unchecked)
+                tg_table.setItem(row, 3, lout_item)
+                combo = _tg_audio_combo(tg.audio_type)
+                combo.currentIndexChanged.connect(
+                    lambda _, r=row: _tg_audio_changed(r)
+                )
+                tg_table.setCellWidget(row, 4, combo)
+            tg_table.blockSignals(False)
+
+        def _tg_audio_changed(row: int) -> None:
+            if not self._config or row >= len(grp.channels):
+                return
+            tg = grp.channels[row]
+            if not isinstance(tg, TalkGroup):
+                return
+            combo = tg_table.cellWidget(row, 4)
+            if combo:
+                tg.audio_type = combo.currentData()
+            self._config.modified = True
+            self.modified.emit()
+
+        def _tg_cell_changed(row: int, col: int) -> None:
+            if not self._config or row >= len(grp.channels):
+                return
+            tg = grp.channels[row]
+            if not isinstance(tg, TalkGroup):
+                return
+            if col == 0:
+                tg.tgid = tg_table.item(row, 0).text().strip()
+            elif col == 1:
+                tg.name = tg_table.item(row, 1).text().strip()
+            elif col == 2:
+                tg.priority = tg_table.item(row, 2).checkState() == Qt.CheckState.Checked
+            elif col == 3:
+                tg.lockout = tg_table.item(row, 3).checkState() == Qt.CheckState.Checked
+            self._config.modified = True
+            self.modified.emit()
+
+        tg_table.cellChanged.connect(_tg_cell_changed)
+
+        def _add_tg() -> None:
+            if not self._config:
+                return
+            tg = TalkGroup()
+            tg.group_id = grp.group_id
+            grp.channels.append(tg)
+            row = tg_table.rowCount()
+            tg_table.blockSignals(True)
+            tg_table.insertRow(row)
+            tg_table.setItem(row, 0, QTableWidgetItem(""))
+            tg_table.setItem(row, 1, QTableWidgetItem(""))
+            pri_item = QTableWidgetItem()
+            pri_item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            pri_item.setCheckState(Qt.CheckState.Unchecked)
+            tg_table.setItem(row, 2, pri_item)
+            lout_item = QTableWidgetItem()
+            lout_item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            lout_item.setCheckState(Qt.CheckState.Unchecked)
+            tg_table.setItem(row, 3, lout_item)
+            combo = _tg_audio_combo("0")
+            combo.currentIndexChanged.connect(lambda _, r=row: _tg_audio_changed(r))
+            tg_table.setCellWidget(row, 4, combo)
+            tg_table.blockSignals(False)
+            tg_table.setCurrentCell(row, 0)
+            tg_table.editItem(tg_table.item(row, 0))
+            self._config.modified = True
+            self.modified.emit()
+            self.structure_changed.emit()
+
+        def _del_tg() -> None:
+            if not self._config:
+                return
+            rows = sorted(set(i.row() for i in tg_table.selectedItems()), reverse=True)
+            for r in rows:
+                if r < len(grp.channels):
+                    grp.channels.pop(r)
+                tg_table.removeRow(r)
+            self._config.modified = True
+            self.modified.emit()
+            self.structure_changed.emit()
+
+        _populate_tg_table()
+        tg_vbox.addWidget(tg_table)
+        btn_row = QHBoxLayout()
+        btn_add = QPushButton("Add Talk Group")
+        btn_del = QPushButton("Delete Selected")
+        btn_add.clicked.connect(_add_tg)
+        btn_del.clicked.connect(_del_tg)
+        btn_row.addWidget(btn_add)
+        btn_row.addWidget(btn_del)
+        btn_row.addStretch()
+        tg_vbox.addLayout(btn_row)
+        layout.addWidget(tg_box)
 
     def _build_system_form(self, sys: System, s_idx: int) -> None:
         self._clear_form()

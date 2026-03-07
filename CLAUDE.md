@@ -108,16 +108,28 @@ so callers receive only the data payload.
 | `SIN,<idx>` | R | Get system info by index |
 | `SIN,<idx>,<fields>` | W | Set system info |
 | `CSY,CNV` | W | Create new conventional system slot, returns its index |
-| `GIN,<idx>` | R | Get group info |
-| `GIN,<idx>,<fields>` | W | Set group info |
+| `CSY,MOT` | W | Create new Motorola trunked system slot, returns its index |
+| `GIN,<idx>` | R | Get group/TGID-group info |
+| `GIN,<idx>,<fields>` | W | Set group/TGID-group info |
 | `AGC,<sys_idx>` | W | Add group to system, returns new group index |
 | `CIN,<idx>` | R | Get channel info |
 | `CIN,<idx>,<fields>` | W | Set channel info |
-| `ACC,<grp_idx>` | W | Add channel to group, returns new channel index |
+| `ACC,<grp_idx>` | W | Add channel to group (or trunk freq to site), returns new index |
 | `QGL,<sys_idx>,<pattern>` | W | Set Quick Group Lockout (10-char binary string) |
 | `GLG` | R | Currently-received channel info (remote control mode) |
 | `KEY,<code>` | W | Send virtual keypress |
 | `STS` | R | Scanner status word |
+| `TRN,<sys_idx>` | R | Get trunking parameters (27-field response) |
+| `TRN,<sys_idx>,<fields>` | W | Set trunking parameters |
+| `SIF,<site_idx>` | R | Get site info (22-field response); field[9]=FWD_INDEX, field[11]=CHN_HEAD |
+| `SIF,<site_idx>,<fields>` | W | Set site info |
+| `AST,<sys_idx>` | W | Append site to trunked system, returns site index |
+| `TFQ,<freq_idx>` | R | Get trunk frequency; field[4]=FWD_INDEX |
+| `TFQ,<freq_idx>,<fields>` | W | Set trunk frequency |
+| `AGT,<sys_idx>` | W | Append TGID group to trunked system, returns group index |
+| `TIN,<tgid_idx>` | R | Get talk group info; field[8]=FWD_INDEX |
+| `TIN,<tgid_idx>,<fields>` | W | Set talk group info |
+| `ACT,<grp_idx>` | W | Append TGID to group, returns tgid index |
 
 ### Download traversal — CRITICAL
 
@@ -141,6 +153,26 @@ CIN,<idx>  →  ...,next_chan_index    field index 11 (0-based) = position 12 (1
 > field index 15 for next-system, and terminated loops at `> 0`.
 > All three bugs together produced zero output with no error messages.
 > See commit `cd4d957` for the fix.
+
+### Trunked download traversal (Motorola)
+
+For trunked systems, SIN field[13] points to the first **site** index (not a conventional group):
+
+```
+TRN,<sys_idx>  →  field[17]=TGID_GRP_HEAD (first TGID group index)
+
+SIF,<site_idx>  →  field[9]=FWD_INDEX (next site)
+                   field[11]=CHN_HEAD  (first trunk freq index)
+
+TFQ,<freq_idx>  →  field[0]=FREQ, field[1]=LCN, field[2]=LOUT
+                   field[4]=FWD_INDEX (next trunk freq)
+
+GIN,<grp_idx>   →  field[5]=next_grp_index, field[7]=first_tgid_index
+   (reused for TGID groups)
+
+TIN,<tgid_idx>  →  field[0]=NAME, field[1]=TGID, field[2]=LOUT,
+                   field[3]=PRI, field[7]=REV_INDEX, field[8]=FWD_INDEX
+```
 
 ### Upload sequence (conventional system)
 

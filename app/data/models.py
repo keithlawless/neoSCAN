@@ -113,8 +113,11 @@ class TalkGroup:
     lockout: bool = False
     alert_tone: str = "0"
     alert_level: str = "0"
-    audio_type: str = "0"
+    audio_type: str = "0"       # 0=All, 1=Analog Only, 2=Digital Only
     record: bool = False
+    priority: bool = False
+    number_tag: str = "NONE"
+    volume_offset: str = "0"
     group_id: str = ""
     _raw: list[str] = field(default_factory=lambda: [""] * 31, repr=False)
 
@@ -129,6 +132,9 @@ class TrunkFrequency:
     lcn: str = ""
     group_id: str = ""
     lockout: bool = False
+    record: bool = False
+    number_tag: str = "NONE"
+    volume_offset: str = "0"
     # extra params [4..10]
     params: list[str] = field(default_factory=lambda: [""] * 8)
 
@@ -195,10 +201,14 @@ class System:
     emg_alert_type: str = "NONE"
     emg_alert_level: str = "1"
     mot_dig_end_code: bool = False
+    id_search: str = "0"        # 0=ID Scan, 1=ID Search
+    mot_id: str = "0"           # 0=Decimal, 1=HEX
+    pri_id_scan: str = "0"      # Priority ID Scan
 
     # P25 / APCO options
     apco_mode: str = "AUTO"
     apco_threshold: str = "8"
+    p25_nac: str = "SRCH"       # P25 NAC (SRCH=search)
 
     # GPS
     gps_enable: bool = False
@@ -222,6 +232,14 @@ class System:
     @property
     def is_conventional(self) -> bool:
         return self.system_type == SYS_TYPE_CONVENTIONAL
+
+    @property
+    def is_motorola(self) -> bool:
+        return self.system_type == SYS_TYPE_MOTOROLA
+
+    @property
+    def is_trunked(self) -> bool:
+        return self.system_type != SYS_TYPE_CONVENTIONAL
 
 
 # -----------------------------------------------------------------------

@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
 
 import serial
 
-from app.data.models import ScannerConfig, System, Group, Channel, TalkGroup, SYS_TYPE_CONVENTIONAL
+from app.data.models import ScannerConfig, System, Group, Channel, TalkGroup, TrunkFrequency, SYS_TYPE_CONVENTIONAL
 from app.serial.protocol import ScannerProtocol, ProtocolError
 from app.serial.scanner_model import mod_mode_to_string, internal_to_sin_type, internal_to_csy_type
 
@@ -178,13 +178,12 @@ class _UploadWorker(QThread):
             self.status.emit(f"Uploading system: {sys.name}")
             self.log_line.emit(f"\n[System] {sys.name} ({sys.type_name})")
 
-            # Trunked systems (Motorola, EDACS, P25, LTR) require trunk frequencies
-            # and talk groups that are not yet supported. Skip them entirely rather
-            # than creating an empty system slot that confuses the scanner.
-            if not sys.is_conventional:
+            # EDACS, P25, and LTR trunked systems are not yet supported.
+            # Motorola (MOT) is handled below.
+            if sys.is_trunked and not sys.is_motorola:
                 self.log_line.emit(
-                    f"  Skipped — trunked system upload not yet supported. "
-                    "Add trunk frequencies and talk groups manually on the scanner."
+                    f"  Skipped — {sys.type_name} system upload not yet supported. "
+                    "Only Motorola trunked systems can be uploaded."
                 )
                 continue
 
@@ -349,6 +348,18 @@ class _UploadWorker(QThread):
                 except ProtocolError:
                     pass
 
+            elif sys.is_motorola:
+                tgs = self._upload_motorola_system(
+                    proto, sys, sys_index, _safe, done, total_steps
+                )
+                ch_count += tgs
+                # QGL for trunked system
+                try:
+                    qgl = sys.qgl or "1111111111"
+                    proto.send_command(f"QGL,{sys_index},{qgl}")
+                except ProtocolError:
+                    pass
+
             sys_count += 1
 
         try:
@@ -356,6 +367,167 @@ class _UploadWorker(QThread):
             self.log_line.emit("\nExited program mode.")
         except ProtocolError as e:
             self.log_line.emit(f"\nWarning: EPG error: {e}")
+
+    def _upload_motorola_system(
+        self,
+        proto: ScannerProtocol,
+        sys: "System",
+        sys_index: str,
+        _safe: set,
+        done: int,
+        total_steps: int,
+    ) -> int:
+        """
+        Upload TRN parameters, sites/trunk-freqs, and TGID groups/talk-groups
+        for a Motorola trunked system.  Returns the number of talk groups uploaded.
+        """
+        tg_count = 0
+
+        # --- TRN: trunking parameters ---
+        # TRN SET format (fields after sys_index, 0-based from protocol spec):
+        #   id_search, status_bit, end_code, i_call, emg_alert, apco_mode,
+        #   fmap, ctm_fmap, p25_nac, mot_id, pri_id_scan
+        try:
+            proto.set_trunking_params(
+                int(sys_index),
+                sys.id_search or "0",
+                "1" if sys.ignore_status_bit else "0",
+                "1" if sys.end_code else "0",
+                "1" if sys.icall else "0",
+                sys.emg_alert_type or "NONE",
+                sys.apco_mode or "AUTO",
+                sys.fleet_map or "16",
+                sys.custom_fleet_map or "",
+                sys.p25_nac or "SRCH",
+                sys.mot_id or "0",
+                sys.pri_id_scan or "0",
+            )
+        except ProtocolError as e:
+            self.log_line.emit(f"  Warning: TRN error: {e}")
+
+        # --- Sites (group_type == "3") → trunk frequencies ---
+        site_groups = [g for g in sys.groups if g.is_site]
+        for site in site_groups:
+            if self._abort:
+                break
+            site_name = "".join(c for c in (site.name or "").strip() if c in _safe)[:16].strip()
+            self.log_line.emit(f"  [Site] {site_name}")
+
+            try:
+                site_idx = proto.append_site(int(sys_index))
+            except ProtocolError as e:
+                self.log_line.emit(f"    ERROR creating site: {e}")
+                continue
+
+            # SIF SET: name, quick_key, hold, lockout, bandwidth(AUTO), ...
+            try:
+                proto.set_site_info(
+                    site_idx,
+                    site_name,
+                    site.quick_key or ".",
+                    "2",                          # hold time
+                    "1" if site.lockout else "0",
+                    "AUTO",                       # bandwidth
+                    "", "",                       # RSV
+                )
+            except ProtocolError as e:
+                self.log_line.emit(f"    Warning: SIF error: {e}")
+
+            # Trunk frequencies belonging to this site (linked by group_id)
+            site_freqs = [
+                tf for tf in sys.trunk_frequencies
+                if tf.group_id == site.group_id
+            ]
+            for tf in site_freqs:
+                if self._abort:
+                    break
+                try:
+                    freq_raw = float(tf.frequency)
+                    freq_int = int(freq_raw * 10000)
+                except (ValueError, TypeError):
+                    continue
+
+                try:
+                    freq_idx = proto.add_trunk_freq(site_idx)
+                except ProtocolError as e:
+                    self.log_line.emit(f"    ERROR allocating trunk freq: {e}")
+                    continue
+
+                # TFQ SET: freq_x10000, lcn, lockout, record, number_tag, vol_offset
+                try:
+                    proto.set_trunk_freq(
+                        freq_idx,
+                        str(freq_int),
+                        tf.lcn or "0",
+                        "1" if tf.lockout else "0",
+                        "1" if tf.record else "0",
+                        tf.number_tag or "NONE",
+                        tf.volume_offset or "0",
+                    )
+                    self.log_line.emit(f"    TF {freq_raw:.4f} MHz  LCN {tf.lcn}")
+                except ProtocolError as e:
+                    self.log_line.emit(f"    Warning: TFQ error: {e}")
+
+        # --- TGID groups (group_type == "2") → talk groups ---
+        tgid_groups = [g for g in sys.groups if not g.is_site]
+        for grp in tgid_groups:
+            if self._abort:
+                break
+            grp_name = "".join(c for c in (grp.name or "").strip() if c in _safe)[:16].strip()
+            self.log_line.emit(f"  [TGID Group] {grp_name}")
+
+            try:
+                grp_idx = proto.append_tgid_group(int(sys_index))
+            except ProtocolError as e:
+                self.log_line.emit(f"    ERROR creating TGID group: {e}")
+                continue
+
+            # Configure TGID group via GIN
+            # SET format: GIN,[GRP_INDEX],[NAME],[QUICK_KEY],[LOUT],[LAT],[LON],[RANGE],[GPS]
+            grp_lout = "1" if grp.lockout else "0"
+            try:
+                proto.set_group_info(
+                    grp_idx,
+                    f"{grp_name},{grp.quick_key or '.'},{ grp_lout},,,,",
+                )
+            except ProtocolError as e:
+                self.log_line.emit(f"    Warning: GIN error: {e}")
+
+            for tg in grp.channels:
+                if self._abort:
+                    break
+                if not isinstance(tg, TalkGroup):
+                    continue
+
+                try:
+                    tgid_idx = proto.append_tgid(grp_idx)
+                except ProtocolError as e:
+                    self.log_line.emit(f"    ERROR allocating TGID: {e}")
+                    continue
+
+                tg_name = "".join(c for c in (tg.name or "").strip() if c in _safe)[:16].strip()
+                # TIN SET: name, tgid, lockout, priority, alert_tone, alert_level,
+                #          audio_type, record, number_tag, volume_offset
+                try:
+                    proto.set_tgid(
+                        tgid_idx,
+                        tg_name,
+                        tg.tgid or "0",
+                        "1" if tg.lockout else "0",
+                        "1" if tg.priority else "0",
+                        tg.alert_tone or "0",
+                        tg.alert_level or "0",
+                        tg.audio_type or "0",
+                        "1" if tg.record else "0",
+                        tg.number_tag or "NONE",
+                        tg.volume_offset or "0",
+                    )
+                    self.log_line.emit(f"    TGID {tg.tgid}  {tg_name}")
+                    tg_count += 1
+                except ProtocolError as e:
+                    self.log_line.emit(f"    Warning: TIN error: {e}")
+
+        return tg_count
 
         # After leaving program mode the scanner may sit on the last channel
         # it touched.  Wait for it to fully exit program mode then send SCAN.
@@ -398,15 +570,20 @@ class UploadDialog(QDialog):
         sys_group = QGroupBox("Select Systems to Upload")
         sys_layout = QVBoxLayout(sys_group)
         self._sys_list = QListWidget()
-        has_trunked = False
+        has_unsupported_trunked = False
         for i, sys in enumerate(self._config.systems):
-            label = (
-                f"[{sys.type_name}] {sys.name or f'System {i+1}'}"
-                f"  ({sum(len(g.channels) for g in sys.groups)} channels)"
+            tg_count = sum(
+                len(g.channels) for g in sys.groups if not g.is_site
+            ) if sys.is_trunked else 0
+            ch_count_label = (
+                f"{tg_count} talk groups, {len(sys.trunk_frequencies)} trunk freqs"
+                if sys.is_motorola else
+                f"{sum(len(g.channels) for g in sys.groups)} channels"
             )
-            if not sys.is_conventional:
-                label += "  ⚠ trunked — channels skipped"
-                has_trunked = True
+            label = f"[{sys.type_name}] {sys.name or f'System {i+1}'}  ({ch_count_label})"
+            if sys.is_trunked and not sys.is_motorola:
+                label += "  ⚠ not yet supported — will be skipped"
+                has_unsupported_trunked = True
             item = QListWidgetItem(label)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Checked)
@@ -415,12 +592,11 @@ class UploadDialog(QDialog):
         self._sys_list.setMaximumHeight(140)
         sys_layout.addWidget(self._sys_list)
 
-        if has_trunked:
+        if has_unsupported_trunked:
             from PyQt6.QtWidgets import QLabel as _QLabel
             warn = _QLabel(
-                "⚠  Trunked systems (Motorola, EDACS, P25, LTR) — the system slot "
-                "will be created on the scanner but trunk frequencies and talk groups "
-                "are not yet uploaded. Only conventional systems are fully supported."
+                "⚠  EDACS, P25, and LTR systems will be skipped — only Motorola "
+                "trunked systems are currently supported for upload."
             )
             warn.setWordWrap(True)
             warn.setStyleSheet("color: #b05000; font-size: 11px;")
