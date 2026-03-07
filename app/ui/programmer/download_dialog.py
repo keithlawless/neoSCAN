@@ -256,6 +256,20 @@ class _DownloadWorker(QThread):
         except ProtocolError as e:
             self.log_line.emit(f"Warning: EPG error: {e}")
 
+        if resume_scan:
+            time.sleep(1.5)
+            try:
+                proto.send_key("S")
+                self.log_line.emit("Scan mode restored.")
+            except ProtocolError as e:
+                self.log_line.emit(f"Warning: could not resume scan: {e}")
+
+        self.progress.emit(100)
+        self.log_line.emit(
+            f"\nDownload complete: {sys_count} system(s), {ch_count} channel(s)."
+        )
+        return config
+
     def _download_motorola_system(
         self,
         proto: ScannerProtocol,
@@ -440,20 +454,6 @@ class _DownloadWorker(QThread):
             tgid_grp_idx = next_grp_idx
 
         return tg_count
-
-        if resume_scan:
-            time.sleep(1.5)
-            try:
-                proto.send_key("S")
-                self.log_line.emit("Scan mode restored.")
-            except ProtocolError as e:
-                self.log_line.emit(f"Warning: could not resume scan: {e}")
-
-        self.progress.emit(100)
-        self.log_line.emit(
-            f"\nDownload complete: {sys_count} system(s), {ch_count} channel(s)."
-        )
-        return config
 
 
 class DownloadDialog(QDialog):
