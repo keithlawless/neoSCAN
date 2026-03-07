@@ -399,10 +399,10 @@ class _UploadWorker(QThread):
         tg_count = 0
 
         # --- TRN: trunking parameters ---
-        # PDF TRN SET format (24 fields after index):
+        # PDF TRN SET format (25 fields after index):
         #   ID_SEARCH, S_BIT, END_CODE, AFS, RSV, RSV,
         #   EMG, EMGL, FMAP, CTM_FMAP,
-        #   RSV×9 (band plan),
+        #   RSV×10,
         #   MOT_ID, EMG_COLOR, EMG_PATTERN, P25NAC, PRI_ID_SCAN
         try:
             fmap = sys.fleet_map or "16"
@@ -424,14 +424,15 @@ class _UploadWorker(QThread):
                 emg_level,                      # 8. EMGL (alert level)
                 fmap,                           # 9. FMAP (fleet map preset)
                 ctm,                            # 10. CTM_FMAP (custom fleet map)
-                "0", "0", "0",                  # 11-13. RSV (band plan group 0)
-                "0", "0", "0",                  # 14-16. RSV (band plan group 1)
-                "0", "0", "0",                  # 17-19. RSV (band plan group 2)
-                "0",                            # 20. MOT_ID (0=Decimal)
-                "OFF",                          # 21. EMG_COLOR
-                "0",                            # 22. EMG_PATTERN
-                "SRCH",                         # 23. P25NAC
-                "0",                            # 24. PRI_ID_SCAN
+                "0", "0", "0",                  # 11-13. RSV
+                "0", "0", "0",                  # 14-16. RSV
+                "0", "0", "0",                  # 17-19. RSV
+                "0",                            # 20. RSV (10th reserved field)
+                "0",                            # 21. MOT_ID (0=Decimal)
+                "OFF",                          # 22. EMG_COLOR
+                "0",                            # 23. EMG_PATTERN
+                "SRCH",                         # 24. P25NAC
+                "0",                            # 25. PRI_ID_SCAN
             )
         except ProtocolError as e:
             self.log_line.emit(f"  Warning: TRN error: {e}")
