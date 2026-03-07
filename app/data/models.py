@@ -235,7 +235,9 @@ class System:
 
     @property
     def is_motorola(self) -> bool:
-        return self.system_type == SYS_TYPE_MOTOROLA
+        # Type 2 = Motorola Type I; Type 3 = Motorola Type II (also covers EDACS
+        # in the .996 format — both share type 3 in FreeSCAN's model).
+        return self.system_type in (SYS_TYPE_MOTOROLA, SYS_TYPE_EDACS)
 
     @property
     def is_trunked(self) -> bool:

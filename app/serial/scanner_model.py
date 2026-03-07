@@ -56,8 +56,8 @@ INT_TO_SIN_TYPE: dict[int, str] = {
 #   1=Conventional, 2=Motorola, 3=EDACS, 4=LTR, 5=P25, 6=EDACS ProVoice, 7=P25(EDACS)
 INT_TO_CSY_TYPE: dict[int, str] = {
     1: "CNV",   # Conventional
-    2: "MOT",   # Motorola
-    3: "EDC",   # EDACS narrow/wide
+    2: "MOT",   # Motorola Type I
+    3: "MOT",   # Motorola Type II (type 3 in .996 = "Motorola Type II / EDACS"; use MOT)
     4: "LTR",   # LTR
     5: "P25S",  # P25 standard
     6: "EDS",   # EDACS SCAT / ProVoice
