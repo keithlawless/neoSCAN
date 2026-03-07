@@ -48,11 +48,20 @@ class AudioRecorder:
             return
         if self._recording:
             return
+        # Close any previous stopped stream before opening a new one.
+        # This is the safe point to call close() — the IO thread has fully
+        # exited by the time stop_recording() returns, so there is no
+        # risk of a use-after-free on the libffi closure.
+        if self._stream is not None:
+            try:
+                self._stream.close()
+            except Exception:
+                pass
+            self._stream = None
         try:
             import sounddevice as sd  # deferred — optional dependency
             with self._lock:
                 self._chunks = []
-            self._recording = True
             self._stream = sd.InputStream(
                 samplerate=SAMPLE_RATE,
                 channels=1,
@@ -61,6 +70,7 @@ class AudioRecorder:
                 callback=self._audio_callback,
             )
             self._stream.start()
+            self._recording = True
             log.debug("AudioRecorder: started on device %d", self._device_index)
         except Exception as exc:
             self._recording = False
@@ -71,17 +81,22 @@ class AudioRecorder:
         """
         Stop the stream and return the captured audio.
         Returns None if nothing was captured or duration < MIN_DURATION_SEC.
+
+        The stream is aborted immediately but intentionally NOT closed here.
+        Calling close() while the CoreAudio IO thread is still unwinding its
+        last callback causes the libffi closure backing the Python callback to
+        be freed mid-call, producing a SIGSEGV at 0x4.  The stream object is
+        kept alive and closed lazily at the start of the next recording (in
+        start_recording()) or on explicit shutdown (in close()).
         """
         if not self._recording:
             return None
         self._recording = False
         try:
             if self._stream:
-                self._stream.stop()
-                self._stream.close()
-                self._stream = None
+                self._stream.abort()  # immediate halt; close is deferred
         except Exception as exc:
-            log.warning("AudioRecorder: error stopping stream — %s", exc)
+            log.warning("AudioRecorder: error aborting stream — %s", exc)
 
         with self._lock:
             chunks = list(self._chunks)
@@ -98,6 +113,20 @@ class AudioRecorder:
 
         log.debug("AudioRecorder: captured %.2fs of audio", duration)
         return audio
+
+    def close(self) -> None:
+        """Release audio resources. Call once on shutdown after recording has stopped."""
+        self._recording = False
+        if self._stream is not None:
+            try:
+                self._stream.abort()
+            except Exception:
+                pass
+            try:
+                self._stream.close()
+            except Exception:
+                pass
+            self._stream = None
 
     def _audio_callback(
         self,

@@ -31,6 +31,8 @@ from app.ui.settings.preferences_dialog import load_prefs
 log = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "base"
+_MAX_QUEUE_DEPTH = 5    # drop new jobs rather than let memory and latency grow unbounded
+_MAX_AUDIO_SECS = 60    # truncate clips longer than this before noise reduction and Whisper
 
 
 def _reduce_noise(audio: np.ndarray) -> np.ndarray:
@@ -113,7 +115,16 @@ class TranscriberWorker(QThread):
 
     def enqueue(self, job: _TranscriptionJob) -> None:
         with QMutexLocker(self._mutex):
+            if len(self._queue) >= _MAX_QUEUE_DEPTH:
+                log.warning(
+                    "TranscriberWorker: queue full (%d jobs pending) — "
+                    "dropping transcription for row %d",
+                    _MAX_QUEUE_DEPTH, job.row_index,
+                )
+                return
             self._queue.append(job)
+            log.debug("TranscriberWorker: enqueued row %d (%d jobs pending)",
+                      job.row_index, len(self._queue))
             self._cond.wakeOne()
 
     def stop(self) -> None:
@@ -135,11 +146,17 @@ class TranscriberWorker(QThread):
             self._process(job)
 
     def _process(self, job: _TranscriptionJob) -> None:
-        duration = len(job.audio) / 16000
+        raw = job.audio
+        max_samples = int(_MAX_AUDIO_SECS * SAMPLE_RATE)
+        if len(raw) > max_samples:
+            log.debug("TranscriberWorker: truncating %.1fs clip to %ds for row %d",
+                      len(raw) / SAMPLE_RATE, _MAX_AUDIO_SECS, job.row_index)
+            raw = raw[:max_samples]
+        duration = len(raw) / SAMPLE_RATE
         try:
-            log.info("Transcribing row %d (%.1fs of audio from device)…",
+            log.info("Transcribing row %d (%.1fs of audio)…",
                      job.row_index, duration)
-            audio = _reduce_noise(job.audio)
+            audio = _reduce_noise(raw)
             result = self._model.transcribe(
                 audio,
                 fp16=False,
@@ -254,7 +271,7 @@ class TranscriptionManager(QObject):
 
     def shutdown(self) -> None:
         """Stop all background threads cleanly."""
-        self._recorder.stop_recording()
+        self._recorder.close()
         if self._worker:
             self._worker.stop()
             self._worker.wait(3000)
