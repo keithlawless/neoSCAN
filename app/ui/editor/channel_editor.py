@@ -151,6 +151,60 @@ HELP = {
         "Up to 16 characters. Displayed on the scanner screen to identify "
         "which group of channels is being scanned."
     ),
+    # Motorola trunked system fields
+    "mot_id_search": (
+        "ID Search Mode\n\n"
+        "Controls how the scanner finds talk groups on this system:\n"
+        "• ID Scan — only monitors talk groups you have programmed\n"
+        "• ID Search — scans all talk group IDs it hears, even unrecognised ones\n\n"
+        "Use ID Search to discover unknown talk groups on a new system."
+    ),
+    "mot_status_bit": (
+        "Status Bit\n\n"
+        "Motorola Type I systems encode a status bit in each transmission that "
+        "distinguishes between different sub-fleets.\n\n"
+        "• Ignore — treat all transmissions on a TGID the same regardless of status bit\n"
+        "• Yes — treat different status-bit values as separate talk groups\n\n"
+        "Leave as Ignore unless you know the system uses status bits."
+    ),
+    "mot_end_code": (
+        "End Code\n\n"
+        "How the scanner recognises the end of a transmission:\n"
+        "• Ignore — scanner uses its own timing to detect end of transmission\n"
+        "• Analog — honours the Motorola analog end-of-transmission code\n"
+        "• Analog + Digital — honours both analog and digital end codes\n\n"
+        "For most systems, Ignore works well."
+    ),
+    "mot_fleet_map": (
+        "Fleet Map\n\n"
+        "Motorola Type I systems divide their talk group space into blocks "
+        "called fleets using a fleet map. This determines how TGID numbers "
+        "are interpreted.\n\n"
+        "Choose the preset that matches the system you are monitoring. "
+        "Select 'Custom' only if you have the exact fleet map from a "
+        "reliable source (e.g. RadioReference)."
+    ),
+    "mot_custom_fleet_map": (
+        "Custom Fleet Map\n\n"
+        "An 8-digit hex string defining the fleet block sizes for a "
+        "Motorola Type I system. Each digit (0–F) encodes the size of one "
+        "of the 8 fleet blocks.\n\n"
+        "Only used when Fleet Map is set to 'Custom'. Incorrect values will "
+        "produce wrong talk group IDs. Leave as 00000000 if unsure."
+    ),
+    "mot_id_display": (
+        "ID Display Format\n\n"
+        "Controls how talk group IDs are displayed on the scanner screen:\n"
+        "• Decimal — shows TGID as a plain decimal number (e.g. 4096)\n"
+        "• HEX — shows TGID in hexadecimal (e.g. 1000)\n\n"
+        "Match this to how TGIDs are listed in your reference source."
+    ),
+    "tgid": (
+        "Talk Group ID (TGID)\n\n"
+        "The numeric identifier for this talk group on the Motorola system. "
+        "Enter the decimal value (e.g. 4096). You can find TGIDs in the "
+        "RadioReference database for your area."
+    ),
 }
 
 
@@ -394,8 +448,10 @@ class ChannelEditorPanel(QWidget):
 
         e_tgid = QLineEdit(tg.tgid)
         e_tgid.setPlaceholderText("Talk group ID (decimal)")
+        e_tgid.setToolTip(HELP["tgid"])
         e_tgid.textChanged.connect(lambda v: self._set_channel_field(s_idx, g_idx, c_idx, "tgid", v))
         form.addRow("TGID:", e_tgid)
+        form.addRow("", _help_label("tgid"))
 
         cb_lockout = QCheckBox("Locked out")
         cb_lockout.setChecked(tg.lockout)
@@ -452,9 +508,11 @@ class ChannelEditorPanel(QWidget):
 
         e_name = QLineEdit(sys.name)
         e_name.setMaxLength(16)
+        e_name.setToolTip(HELP["sys_name"])
         e_name.textChanged.connect(lambda v: self._set_system_field(s_idx, "name", v))
         e_name.textChanged.connect(lambda v: self._title.setText(f"System: {v or '(unnamed)'}  [Motorola]"))
         form.addRow("System Name:", e_name)
+        form.addRow("", _help_label("sys_name"))
 
         qk_row, _ = self._qk_row(
             sys.quick_key,
@@ -462,44 +520,55 @@ class ChannelEditorPanel(QWidget):
             self._used_system_qks,
         )
         form.addRow("Quick Key:", qk_row)
+        form.addRow("", _help_label("quick_key"))
 
         e_hold = QLineEdit(sys.hold_time)
         e_hold.setPlaceholderText("tenths of a second")
+        e_hold.setToolTip(HELP["hold_time"])
         e_hold.textChanged.connect(lambda v: self._set_system_field(s_idx, "hold_time", v))
         form.addRow("Hold Time:", e_hold)
+        form.addRow("", _help_label("hold_time"))
 
         e_delay = QLineEdit(sys.delay_time)
         e_delay.setPlaceholderText("seconds")
+        e_delay.setToolTip(HELP["delay"])
         e_delay.textChanged.connect(lambda v: self._set_system_field(s_idx, "delay_time", v))
         form.addRow("Delay Time:", e_delay)
+        form.addRow("", _help_label("delay"))
 
         c_id_search = QComboBox()
         c_id_search.addItem("ID Scan", userData="0")
         c_id_search.addItem("ID Search", userData="1")
         idx = c_id_search.findData(sys.id_search or "0")
         c_id_search.setCurrentIndex(idx if idx >= 0 else 0)
+        c_id_search.setToolTip(HELP["mot_id_search"])
         c_id_search.currentIndexChanged.connect(
             lambda _: self._set_system_field(s_idx, "id_search", c_id_search.currentData())
         )
         form.addRow("ID Search Mode:", c_id_search)
+        form.addRow("", _help_label("mot_id_search"))
 
         c_sbit = QComboBox()
         c_sbit.addItem("Ignore", userData=False)
         c_sbit.addItem("Yes", userData=True)
         c_sbit.setCurrentIndex(1 if sys.ignore_status_bit else 0)
+        c_sbit.setToolTip(HELP["mot_status_bit"])
         c_sbit.currentIndexChanged.connect(
             lambda _: self._set_system_field(s_idx, "ignore_status_bit", c_sbit.currentData())
         )
         form.addRow("Status Bit:", c_sbit)
+        form.addRow("", _help_label("mot_status_bit"))
 
         c_end = QComboBox()
         c_end.addItem("Ignore", userData=False)
         c_end.addItem("Analog", userData=True)
         c_end.setCurrentIndex(1 if sys.end_code else 0)
+        c_end.setToolTip(HELP["mot_end_code"])
         c_end.currentIndexChanged.connect(
             lambda _: self._set_system_field(s_idx, "end_code", c_end.currentData())
         )
         form.addRow("End Code:", c_end)
+        form.addRow("", _help_label("mot_end_code"))
 
         # Fleet map: preset numbers 1–16 or Custom
         c_fmap = QComboBox()
@@ -508,10 +577,12 @@ class ChannelEditorPanel(QWidget):
         c_fmap.addItem("Custom", userData="0")
         fmap_idx = c_fmap.findData(sys.fleet_map or "16")
         c_fmap.setCurrentIndex(fmap_idx if fmap_idx >= 0 else c_fmap.count() - 1)
+        c_fmap.setToolTip(HELP["mot_fleet_map"])
 
         e_ctm_fmap = QLineEdit(sys.custom_fleet_map or "")
         e_ctm_fmap.setPlaceholderText("8 hex digits (e.g. 00FFFFFF)")
         e_ctm_fmap.setEnabled(sys.fleet_map == "0")
+        e_ctm_fmap.setToolTip(HELP["mot_custom_fleet_map"])
         e_ctm_fmap.textChanged.connect(
             lambda v: self._set_system_field(s_idx, "custom_fleet_map", v)
         )
@@ -523,20 +594,25 @@ class ChannelEditorPanel(QWidget):
             )
         )
         form.addRow("Fleet Map:", c_fmap)
+        form.addRow("", _help_label("mot_fleet_map"))
         form.addRow("Custom Fleet Map:", e_ctm_fmap)
+        form.addRow("", _help_label("mot_custom_fleet_map"))
 
         c_mot_id = QComboBox()
         c_mot_id.addItem("Decimal", userData="0")
         c_mot_id.addItem("HEX", userData="1")
         idx = c_mot_id.findData(sys.mot_id or "0")
         c_mot_id.setCurrentIndex(idx if idx >= 0 else 0)
+        c_mot_id.setToolTip(HELP["mot_id_display"])
         c_mot_id.currentIndexChanged.connect(
             lambda _: self._set_system_field(s_idx, "mot_id", c_mot_id.currentData())
         )
         form.addRow("ID Display:", c_mot_id)
+        form.addRow("", _help_label("mot_id_display"))
 
         cb_lockout = QCheckBox("Locked out (skip this system)")
         cb_lockout.setChecked(sys.lockout)
+        cb_lockout.setToolTip(HELP["lockout"])
         cb_lockout.toggled.connect(lambda v: self._set_system_field(s_idx, "lockout", v))
         form.addRow("", cb_lockout)
 
@@ -546,11 +622,12 @@ class ChannelEditorPanel(QWidget):
         tf_box = QGroupBox("Trunk Frequencies")
         tf_vbox = QVBoxLayout(tf_box)
 
-        tf_table = QTableWidget(0, 3)
-        tf_table.setHorizontalHeaderLabels(["Frequency (MHz)", "LCN", "Lockout"])
+        # LCN is auto-assigned at upload time (1, 2, 3, … per FreeSCAN convention).
+        # It is not exposed here to avoid confusion.
+        tf_table = QTableWidget(0, 2)
+        tf_table.setHorizontalHeaderLabels(["Frequency (MHz)", "Lockout"])
         tf_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         tf_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        tf_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         tf_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         tf_table.verticalHeader().setVisible(False)
 
@@ -560,11 +637,10 @@ class ChannelEditorPanel(QWidget):
             row = tf_table.rowCount()
             tf_table.insertRow(row)
             tf_table.setItem(row, 0, QTableWidgetItem(tf.frequency))
-            tf_table.setItem(row, 1, QTableWidgetItem(tf.lcn))
             cb_item = QTableWidgetItem()
             cb_item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
             cb_item.setCheckState(Qt.CheckState.Checked if tf.lockout else Qt.CheckState.Unchecked)
-            tf_table.setItem(row, 2, cb_item)
+            tf_table.setItem(row, 1, cb_item)
         tf_table.blockSignals(False)
 
         def _tf_changed(row: int, col: int) -> None:
@@ -574,42 +650,29 @@ class ChannelEditorPanel(QWidget):
             if col == 0:
                 tf.frequency = tf_table.item(row, 0).text().strip()
             elif col == 1:
-                tf.lcn = tf_table.item(row, 1).text().strip()
-            elif col == 2:
-                tf.lockout = tf_table.item(row, 2).checkState() == Qt.CheckState.Checked
+                tf.lockout = tf_table.item(row, 1).checkState() == Qt.CheckState.Checked
             self._config.modified = True
             self.modified.emit()
 
         tf_table.cellChanged.connect(_tf_changed)
 
-        def _tf_default_group_id() -> str:
-            """Return group_id of first site, creating one if needed."""
-            for grp in sys.groups:
-                if grp.is_site:
-                    return grp.group_id
-            # Create a default site group
-            site = Group()
-            site.name = "Site 1"
-            site.group_type = "3"
-            site.group_id = uuid.uuid4().hex[:16].upper()
-            sys.groups.append(site)
-            return site.group_id
-
         def _add_tf() -> None:
             if not self._config:
                 return
             tf = TrunkFrequency()
-            tf.group_id = _tf_default_group_id()
+            # Link trunk freq to the system via its group_id.
+            # The upload dialog creates the actual site on the scanner via AST;
+            # the .996 file loader accepts both system and site group_ids.
+            tf.group_id = sys.group_id
             sys.trunk_frequencies.append(tf)
             row = tf_table.rowCount()
             tf_table.blockSignals(True)
             tf_table.insertRow(row)
             tf_table.setItem(row, 0, QTableWidgetItem(""))
-            tf_table.setItem(row, 1, QTableWidgetItem("0"))
             cb_item = QTableWidgetItem()
             cb_item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
             cb_item.setCheckState(Qt.CheckState.Unchecked)
-            tf_table.setItem(row, 2, cb_item)
+            tf_table.setItem(row, 1, cb_item)
             tf_table.blockSignals(False)
             tf_table.setCurrentCell(row, 0)
             tf_table.editItem(tf_table.item(row, 0))
@@ -825,9 +888,12 @@ class ChannelEditorPanel(QWidget):
         if cur >= 0:
             c_type.setCurrentIndex(cur)
         c_type.setToolTip(HELP["sys_type"])
-        c_type.currentIndexChanged.connect(
-            lambda _: self._set_system_field(s_idx, "system_type", c_type.currentData())
-        )
+        def _on_type_changed(_):
+            self._set_system_field(s_idx, "system_type", c_type.currentData())
+            # Rebuild the form so the correct fields are shown for the new type
+            if self._config:
+                self.show_system(self._config, s_idx)
+        c_type.currentIndexChanged.connect(_on_type_changed)
         form.addRow("System Type:", c_type)
         form.addRow("", _help_label("sys_type"))
 
