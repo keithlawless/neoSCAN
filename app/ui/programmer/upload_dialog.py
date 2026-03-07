@@ -399,12 +399,11 @@ class _UploadWorker(QThread):
         tg_count = 0
 
         # --- TRN: trunking parameters ---
-        # FreeSCAN TRN SET format for BCT15X (Motorola Type II / M82S):
-        #   TRN,<sys>,<id_mode>,<status_bit>,<end_code>,<edacs_fmt=0>,
-        #       <i_call>,<con_ch=0>,<emg_alert_type>,<emg_alert_level>,
-        #       <fleet_map>,<custom_fleet_map>,
-        #       <base0>,<mstep0>,<offset0>,<base1>,<mstep1>,<offset1>,
-        #       <base2>,<mstep2>,<offset2>,<dig_code=0>
+        # PDF TRN SET format (24 fields after index):
+        #   ID_SEARCH, S_BIT, END_CODE, AFS, RSV, RSV,
+        #   EMG, EMGL, FMAP, CTM_FMAP,
+        #   RSV×9 (band plan),
+        #   MOT_ID, EMG_COLOR, EMG_PATTERN, P25NAC, PRI_ID_SCAN
         try:
             fmap = sys.fleet_map or "16"
             # Custom fleet map must be exactly 8 hex chars.
@@ -415,20 +414,24 @@ class _UploadWorker(QThread):
             emg_type = "0"  # numeric index; NONE=0
             proto.set_trunking_params(
                 int(sys_index),
-                sys.id_search or "0",           # id_mode
-                "1" if sys.ignore_status_bit else "0",  # status_bit
-                "1" if sys.end_code else "0",   # end_code
-                "0",                            # edacs_format (0 for Motorola)
-                "1" if sys.icall else "0",      # i_call
-                "0",                            # con_ch (control channel — 0=auto)
-                emg_type,                       # emg_alert_type
-                emg_level,                      # emg_alert_level
-                fmap,                           # fleet_map preset (1-16)
-                ctm,                            # custom fleet map
-                "0", "0", "0",                  # base/mstep/offset band plan group 0
-                "0", "0", "0",                  # band plan group 1
-                "0", "0", "0",                  # band plan group 2
-                "0",                            # dig_code
+                sys.id_search or "0",           # 1. ID_SEARCH
+                "1" if sys.ignore_status_bit else "0",  # 2. S_BIT
+                "1" if sys.end_code else "0",   # 3. END_CODE
+                "0",                            # 4. AFS (EDACS format, 0 for Motorola)
+                "0",                            # 5. RSV
+                "0",                            # 6. RSV
+                emg_type,                       # 7. EMG (alert type)
+                emg_level,                      # 8. EMGL (alert level)
+                fmap,                           # 9. FMAP (fleet map preset)
+                ctm,                            # 10. CTM_FMAP (custom fleet map)
+                "0", "0", "0",                  # 11-13. RSV (band plan group 0)
+                "0", "0", "0",                  # 14-16. RSV (band plan group 1)
+                "0", "0", "0",                  # 17-19. RSV (band plan group 2)
+                "0",                            # 20. MOT_ID (0=Decimal)
+                "OFF",                          # 21. EMG_COLOR
+                "0",                            # 22. EMG_PATTERN
+                "SRCH",                         # 23. P25NAC
+                "0",                            # 24. PRI_ID_SCAN
             )
         except ProtocolError as e:
             self.log_line.emit(f"  Warning: TRN error: {e}")
@@ -485,9 +488,8 @@ class _UploadWorker(QThread):
                     self.log_line.emit(f"    ERROR allocating trunk freq: {e}")
                     continue
 
-                # TFQ SET (BCT15X format): freq_x10000,lcn,lout
-                # BCT15X uses 3-field format: no record/numtag/vol_offset (those
-                # are BCD996XT extensions).
+                # TFQ SET format (PDF page 218, 7 fields after index):
+                #   FRQ, LCN, LOUT, RECORD, NUMBER_TAG, VOL_OFFSET, RSV
                 # LCN 0 is invalid — mirror FreeSCAN: auto-increment from 1, or
                 # use the stored LCN if it is non-zero.
                 auto_lcn += 1
@@ -496,9 +498,13 @@ class _UploadWorker(QThread):
                 try:
                     tfq_resp = proto.set_trunk_freq(
                         freq_idx,
-                        str(freq_int),
-                        lcn,
-                        "1" if tf.lockout else "0",
+                        str(freq_int),           # FRQ
+                        lcn,                     # LCN
+                        "1" if tf.lockout else "0",  # LOUT
+                        "0",                     # RECORD
+                        "NONE",                  # NUMBER_TAG
+                        "0",                     # VOL_OFFSET
+                        "",                      # RSV
                     )
                     self.log_line.emit(f"    TF {freq_raw:.4f} MHz  LCN {lcn}  [TFQ idx={freq_idx} resp={tfq_resp!r}]")
                 except ProtocolError as e:
@@ -542,18 +548,24 @@ class _UploadWorker(QThread):
                     continue
 
                 tg_name = "".join(c for c in (tg.name or "").strip() if c in _safe)[:16].strip()
-                # TIN SET (BCT15X format): NAME,TGID,LOUT,PRI,ALT,ALTL
-                # BCT15X uses 6-field format (FreeSCAN Bln246=False path).
-                # BCD996XT adds AUDIO_TYPE, RECORD, NUMTAG, etc. — not for BCT15X.
+                # TIN SET format (PDF page 221, 12 fields after index):
+                #   NAME, TGID, LOUT, PRI, ALT, ALTL,
+                #   RECORD, AUDIO_TYPE, NUMBER_TAG, ALT_COLOR, ALT_PATTERN, VOL_OFFSET
                 try:
                     tin_resp = proto.set_tgid(
                         tgid_idx,
-                        tg_name,
-                        tg.tgid or "0",
-                        "1" if tg.lockout else "0",
-                        "1" if tg.priority else "0",
-                        tg.alert_tone or "0",
-                        tg.alert_level or "0",
+                        tg_name,                         # NAME
+                        tg.tgid or "0",                  # TGID
+                        "1" if tg.lockout else "0",      # LOUT
+                        "1" if tg.priority else "0",     # PRI
+                        tg.alert_tone or "0",            # ALT
+                        tg.alert_level or "0",           # ALTL
+                        "0",                             # RECORD
+                        "0",                             # AUDIO_TYPE
+                        "NONE",                          # NUMBER_TAG
+                        "OFF",                           # ALT_COLOR
+                        "0",                             # ALT_PATTERN
+                        "0",                             # VOL_OFFSET
                     )
                     self.log_line.emit(f"    TGID {tg.tgid}  {tg_name}  [TIN idx={tgid_idx} resp={tin_resp!r}]")
                     tg_count += 1
