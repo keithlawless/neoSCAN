@@ -79,14 +79,17 @@ class ScannerProtocol:
         response = self._read_line(timeout)
         log.debug("RX: %r", response)
 
-        if response == "ERR":
-            raise ProtocolError(f"Scanner returned ERR for command: {full_cmd!r}")
         if not response:
             raise ProtocolError(f"Timeout waiting for response to: {full_cmd!r}")
+        if response == "ERR":
+            raise ProtocolError(f"Scanner returned ERR for command: {full_cmd!r}")
 
         # Strip echoed command prefix if present (e.g. "MDL,BCT15X" → "BCT15X")
         if "," in response:
             _, _, payload = response.partition(",")
+            # Scanner may return "CMD,ERR" (prefix + ERR payload)
+            if payload == "ERR":
+                raise ProtocolError(f"Scanner returned ERR for command: {full_cmd!r}")
             return payload
         return response
 
@@ -186,3 +189,159 @@ class ScannerProtocol:
         mode: P=Press (default), L=Long Press, H=Hold, R=Release
         """
         self.send_command("KEY", key, mode)
+
+    # ------------------------------------------------------------------
+    # Program mode — system index head
+    # ------------------------------------------------------------------
+
+    def get_system_index_head(self) -> int:
+        """SIH — return index of first system, or -1 if none."""
+        payload = self.send_command("SIH")
+        try:
+            return int(payload.split(",")[0])
+        except (ValueError, IndexError):
+            return -1
+
+    # ------------------------------------------------------------------
+    # Conventional system read/write
+    # ------------------------------------------------------------------
+
+    def get_system_info(self, sys_index: int) -> list[str]:
+        """SIN,<idx> — return system info fields (0-based list)."""
+        payload = self.send_command("SIN", str(sys_index))
+        return payload.split(",")
+
+    def set_system_info(self, sys_index: int, payload: str) -> None:
+        """SIN,<idx>,<fields> — write system info."""
+        self.send_command("SIN", *([str(sys_index)] + payload.split(",")))
+
+    def create_system(self, sys_type: str = "CNV") -> int:
+        """CSY,<type> — create new system slot, return its index."""
+        payload = self.send_command("CSY", sys_type)
+        try:
+            return int(payload.split(",")[0])
+        except (ValueError, IndexError):
+            raise ProtocolError(f"CSY returned unexpected payload: {payload!r}")
+
+    def get_group_info(self, grp_index: int) -> list[str]:
+        """GIN,<idx> — return group info fields."""
+        payload = self.send_command("GIN", str(grp_index))
+        return payload.split(",")
+
+    def set_group_info(self, grp_index: int, payload: str) -> None:
+        """GIN,<idx>,<fields> — write group info."""
+        self.send_command("GIN", *([str(grp_index)] + payload.split(",")))
+
+    def add_group(self, sys_index: int) -> int:
+        """AGC,<sys_idx> — add group to system, return new group index."""
+        payload = self.send_command("AGC", str(sys_index))
+        try:
+            return int(payload.split(",")[0])
+        except (ValueError, IndexError):
+            raise ProtocolError(f"AGC returned unexpected payload: {payload!r}")
+
+    def get_channel_info(self, ch_index: int) -> list[str]:
+        """CIN,<idx> — return channel info fields."""
+        payload = self.send_command("CIN", str(ch_index))
+        return payload.split(",")
+
+    def set_channel_info(self, ch_index: int, payload: str) -> None:
+        """CIN,<idx>,<fields> — write channel info."""
+        self.send_command("CIN", *([str(ch_index)] + payload.split(",")))
+
+    def add_channel(self, grp_index: int) -> int:
+        """ACC,<grp_idx> — add channel to group, return new channel index."""
+        payload = self.send_command("ACC", str(grp_index))
+        try:
+            return int(payload.split(",")[0])
+        except (ValueError, IndexError):
+            raise ProtocolError(f"ACC returned unexpected payload: {payload!r}")
+
+    def set_quick_group_lockout(self, sys_index: int, pattern: str) -> None:
+        """QGL,<sys_idx>,<pattern> — set quick group lockout pattern."""
+        self.send_command("QGL", str(sys_index), pattern)
+
+    def delete_system(self, sys_index: int) -> None:
+        """DSY,<sys_idx> — delete a system."""
+        self.send_command("DSY", str(sys_index))
+
+    # ------------------------------------------------------------------
+    # Trunked system protocol commands
+    # ------------------------------------------------------------------
+
+    def get_trunking_params(self, sys_index: int) -> list[str]:
+        """TRN,<sys_idx> — return trunking parameters (27-field response)."""
+        payload = self.send_command("TRN", str(sys_index))
+        return payload.split(",")
+
+    def set_trunking_params(self, sys_index: int, *fields: str) -> None:
+        """TRN,<sys_idx>,<fields> — write trunking parameters."""
+        self.send_command("TRN", str(sys_index), *fields)
+
+    def get_site_info(self, site_index: int) -> list[str]:
+        """SIF,<site_idx> — return site info fields (22-field response)."""
+        payload = self.send_command("SIF", str(site_index))
+        return payload.split(",")
+
+    def set_site_info(self, site_index: int, *fields: str) -> None:
+        """SIF,<site_idx>,<fields> — write site info."""
+        self.send_command("SIF", str(site_index), *fields)
+
+    def append_site(self, sys_index: int, site_type: str = "M82S") -> int:
+        """AST,<sys_idx>,<site_type> — add site to trunked system, return site index.
+
+        site_type: scanner string e.g. 'M82S' (Mot Type II), 'M81S' (Mot Type I).
+        FreeSCAN sends AST with two parameters; omitting the type causes ERR on BCT15X.
+        """
+        payload = self.send_command("AST", str(sys_index), site_type)
+        try:
+            return int(payload.split(",")[0])
+        except (ValueError, IndexError):
+            raise ProtocolError(f"AST returned unexpected payload: {payload!r}")
+
+    def get_trunk_freq(self, freq_index: int) -> list[str]:
+        """TFQ,<freq_idx> — return trunk frequency fields (10-field response)."""
+        payload = self.send_command("TFQ", str(freq_index))
+        return payload.split(",")
+
+    def set_trunk_freq(self, freq_index: int, *fields: str) -> str:
+        """TFQ,<freq_idx>,<fields> — write trunk frequency. Returns scanner response."""
+        return self.send_command("TFQ", str(freq_index), *fields)
+
+    def add_trunk_freq(self, site_index: int) -> int:
+        """ACC,<site_idx> — add trunk frequency to site, return freq index.
+
+        Note: ACC is reused for trunk frequencies (same command as add_channel,
+        but the scanner context determines whether it creates a trunk freq or
+        a conventional channel).
+        """
+        payload = self.send_command("ACC", str(site_index))
+        try:
+            return int(payload.split(",")[0])
+        except (ValueError, IndexError):
+            raise ProtocolError(f"ACC returned unexpected payload: {payload!r}")
+
+    def append_tgid_group(self, sys_index: int) -> int:
+        """AGT,<sys_idx> — add TGID group to trunked system, return group index."""
+        payload = self.send_command("AGT", str(sys_index))
+        try:
+            return int(payload.split(",")[0])
+        except (ValueError, IndexError):
+            raise ProtocolError(f"AGT returned unexpected payload: {payload!r}")
+
+    def get_tgid(self, tgid_index: int) -> list[str]:
+        """TIN,<tgid_idx> — return talk group info fields (16-field response)."""
+        payload = self.send_command("TIN", str(tgid_index))
+        return payload.split(",")
+
+    def set_tgid(self, tgid_index: int, *fields: str) -> str:
+        """TIN,<tgid_idx>,<fields> — write talk group info. Returns scanner response."""
+        return self.send_command("TIN", str(tgid_index), *fields)
+
+    def append_tgid(self, grp_index: int) -> int:
+        """ACT,<grp_idx> — add talk group to TGID group, return tgid index."""
+        payload = self.send_command("ACT", str(grp_index))
+        try:
+            return int(payload.split(",")[0])
+        except (ValueError, IndexError):
+            raise ProtocolError(f"ACT returned unexpected payload: {payload!r}")

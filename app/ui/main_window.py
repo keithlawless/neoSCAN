@@ -197,6 +197,7 @@ class MainWindow(QMainWindow):
 
         self._channel_editor = ChannelEditorPanel()
         self._channel_editor.modified.connect(self._on_editor_modified)
+        self._channel_editor.structure_changed.connect(self._on_structure_changed)
 
         self._editor_splitter.addWidget(self._systems_panel)
         self._editor_splitter.addWidget(self._channel_editor)
@@ -313,6 +314,12 @@ class MainWindow(QMainWindow):
 
     def _on_editor_modified(self) -> None:
         self._systems_panel.refresh_selected_item()
+        self._update_title()
+
+    def _on_structure_changed(self) -> None:
+        """Rebuild the tree when items are added/removed (e.g. talk groups)."""
+        if self._config:
+            self._systems_panel.load_config(self._config)
         self._update_title()
 
     # ------------------------------------------------------------------

@@ -271,8 +271,16 @@ def load(path: str | Path) -> ScannerConfig:
                     ch.name, ch.group_id,
                 )
 
-    # Assign trunk frequencies to systems via group_id
-    sys_id_map: dict[str, System] = {s.group_id: s for s in config.systems if s.group_id}
+    # Assign trunk frequencies to systems via group_id.
+    # Trunk freqs in the TrunkSection carry the site group's group_id (group_type="3"),
+    # not the system's group_id — so include site groups in the lookup map too.
+    sys_id_map: dict[str, System] = {}
+    for s in config.systems:
+        if s.group_id:
+            sys_id_map[s.group_id] = s
+        for grp in s.groups:
+            if grp.group_id and grp.group_type == "3":  # site group
+                sys_id_map[grp.group_id] = s
     for tf in config.trunk_frequencies:
         sys = sys_id_map.get(tf.group_id)
         if sys:
@@ -328,21 +336,12 @@ def _build_channel(raw: list[str]) -> Channel | TalkGroup:
     group_id = raw[10]
     name = raw[1]
     # Determine if this is a conventional channel (raw[2] looks like a frequency)
-    # or a trunked talk group (raw[2] is a TGID / integer string)
+    # or a trunked talk group (raw[2] is a TGID / integer string).
+    # Frequencies in .996 files always contain a decimal point (e.g. "154.2350").
+    # TGIDs are plain integers (e.g. "33776"), so the decimal point is the reliable
+    # discriminator — the old "< 25" threshold failed for Motorola Type II TGIDs.
     freq_or_tgid = raw[2]
-    try:
-        float(freq_or_tgid)
-        is_conv = True
-    except (ValueError, TypeError):
-        is_conv = bool(freq_or_tgid)
-
-    # Heuristic: if frequency parses as a float > 25, treat as conventional
-    if is_conv:
-        try:
-            if float(freq_or_tgid) < 25:
-                is_conv = False  # likely a TGID
-        except (ValueError, TypeError):
-            is_conv = False
+    is_conv = bool(freq_or_tgid) and "." in freq_or_tgid
 
     if is_conv:
         ch = Channel()
@@ -426,8 +425,16 @@ def save(config: ScannerConfig, path: str | Path | None = None) -> None:
                 w(grp_raw[s])
 
     # Trunk section
-    # Flatten all trunk frequencies from all systems
+    # Collect trunk freqs from global pool plus any in sys.trunk_frequencies
+    # (the latter occur after a scanner download where freqs were added directly
+    # to sys.trunk_frequencies without going through config.trunk_frequencies).
+    seen_ids = {id(tf) for tf in config.trunk_frequencies}
     all_trunk: list[TrunkFrequency] = list(config.trunk_frequencies)
+    for sys in config.systems:
+        for tf in sys.trunk_frequencies:
+            if id(tf) not in seen_ids:
+                all_trunk.append(tf)
+                seen_ids.add(id(tf))
     w("TrunkSection")
     w_int(len(all_trunk))
     for tf in all_trunk:
