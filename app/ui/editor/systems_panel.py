@@ -152,6 +152,7 @@ class SystemsPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _rebuild_tree(self) -> None:
+        col0_width = self._tree.columnWidth(0) or None
         self._model.clear()
         self._model.setHorizontalHeaderLabels(["Name", "Type / Frequency"])
         if not self._config:
@@ -160,6 +161,8 @@ class SystemsPanel(QWidget):
             sys_item = self._make_system_item(sys, s_idx)
             self._model.appendRow(sys_item)
         self._tree.expandToDepth(0)
+        if col0_width:
+            self._tree.setColumnWidth(0, col0_width)
         self._update_toolbar()
 
     def _make_system_item(self, sys: System, s_idx: int) -> list[QStandardItem]:
