@@ -27,7 +27,7 @@ from PyQt6.QtWidgets import (
 
 from app.data.models import (
     ScannerConfig, System, Group, Channel, TalkGroup, TrunkFrequency,
-    SYSTEM_TYPE_NAMES, SYS_TYPE_CONVENTIONAL,
+    SYSTEM_TYPE_NAMES, SYS_TYPE_CONVENTIONAL, SYS_TYPE_MOTOROLA,
 )
 import uuid
 
@@ -881,9 +881,13 @@ class ChannelEditorPanel(QWidget):
         form.addRow("System Name:", e_name)
         form.addRow("", _help_label("sys_name"))
 
+        IMPLEMENTED_SYSTEM_TYPES = {SYS_TYPE_CONVENTIONAL, SYS_TYPE_MOTOROLA}
         c_type = QComboBox()
-        for type_id, type_name in SYSTEM_TYPE_NAMES.items():
+        for i, (type_id, type_name) in enumerate(SYSTEM_TYPE_NAMES.items()):
             c_type.addItem(type_name, userData=type_id)
+            if type_id not in IMPLEMENTED_SYSTEM_TYPES:
+                item = c_type.model().item(i)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
         cur = c_type.findData(sys.system_type)
         if cur >= 0:
             c_type.setCurrentIndex(cur)
