@@ -451,23 +451,23 @@ class _UploadWorker(QThread):
             except ProtocolError as e:
                 self.log_line.emit(f"  Warning: AST (create site) error: {e}")
 
-        if site_index > 0 and sys.trunk_frequencies:
+        if site_index != -1 and sys.trunk_frequencies:
             # Configure site via SIF (sets name, modulation, etc.)
-            # BCT15X SIF SET (FreeSCAN bln15XT format):
-            #   name,qk,hld,lout,mod,att,con_ch,[empty],[empty],start_key,
-            #   lat,lon,range,gps,state,STD,,
-            # The two empty fields between con_ch and start_key come from
-            # FreeSCAN's strCMD(1) ending with ",," and strCMD(2) starting with ","
+            # BCD996P2 SIF SET format (19 fields after index — superset of BCT15X):
+            #   name, qk, hld, lout, mod, att, C-CH(always 1), rsv, rsv, start_key,
+            #   lat, lon, range, gps, rsv, mot_type, edacs_type, p25waiting, rsv
+            # C-CH is "always 1:ON" per BCD996P2 spec; the BCT15X had "0" here
+            # and a BCT15X-specific STATE field ("00") where the spec now has rsv.
             site_name = "".join(c for c in (sys.name or "").strip() if c in _safe)[:16].strip()
             try:
                 proto.set_site_info(
                     site_index,
-                    site_name, ".", "0", "0",         # name, qk, hld, lout
-                    "AUTO", "0", "0", "", "",           # mod, att, con_ch, empty, empty
-                    ".",                                 # start_key
+                    site_name, ".", "0", "0",          # name, qk, hld, lout
+                    "AUTO", "0", "1", "", "",           # mod, att, C-CH(1=always ON), rsv, rsv
+                    ".",                                # start_key
                     "00000000N", "00000000E", "", "0",  # lat, lon, range, gps
-                    "00",                               # state
-                    "STD", "",                          # site_type, trailing
+                    "",                                 # rsv (BCT15X had STATE "00" here)
+                    "STD", "", "", "",                  # mot_type, edacs_type, p25waiting, rsv
                 )
             except ProtocolError as e:
                 self.log_line.emit(f"  Warning: SIF error: {e}")

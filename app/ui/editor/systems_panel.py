@@ -135,8 +135,12 @@ class SystemsPanel(QWidget):
             grp = self._config.systems[s_idx].groups[g_idx]
             name_item.setText(grp.name or f"Group {g_idx + 1}")
             if info_item:
-                ch_count = len(grp.channels)
-                info_item.setText(f"{ch_count} channel{'s' if ch_count != 1 else ''}")
+                if grp.is_site:
+                    tf_count = len(self._config.systems[s_idx].trunk_frequencies)
+                    info_item.setText(f"Trunk site — {tf_count} freq{'s' if tf_count != 1 else ''}")
+                else:
+                    ch_count = len(grp.channels)
+                    info_item.setText(f"{ch_count} channel{'s' if ch_count != 1 else ''}")
 
         elif item_type == "channel" and all(x is not None for x in (s_idx, g_idx, c_idx)):
             ch = self._config.systems[s_idx].groups[g_idx].channels[c_idx]
@@ -189,9 +193,14 @@ class SystemsPanel(QWidget):
     def _make_group_item(
         self, grp: Group, s_idx: int, g_idx: int
     ) -> list[QStandardItem]:
-        ch_count = len(grp.channels)
         name_item = QStandardItem(grp.name or f"Group {g_idx + 1}")
-        info_item = QStandardItem(f"{ch_count} channel{'s' if ch_count != 1 else ''}")
+        if grp.is_site:
+            # Trunk sites hold trunk frequencies (in sys.trunk_frequencies), not channels
+            tf_count = len(self._config.systems[s_idx].trunk_frequencies) if self._config else 0
+            info_item = QStandardItem(f"Trunk site — {tf_count} freq{'s' if tf_count != 1 else ''}")
+        else:
+            ch_count = len(grp.channels)
+            info_item = QStandardItem(f"{ch_count} channel{'s' if ch_count != 1 else ''}")
 
         if grp.lockout:
             name_item.setForeground(QColor("#999"))
