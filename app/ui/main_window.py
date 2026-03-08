@@ -492,7 +492,7 @@ class MainWindow(QMainWindow):
         from app.ui.programmer.upload_dialog import UploadDialog
         self._log_panel.pause_polling()
         try:
-            dlg = UploadDialog(self._proto, self._config, parent=self)
+            dlg = UploadDialog(self._proto, self._config, scanner_model=self._scanner_model, parent=self)
             dlg.exec()
         finally:
             self._log_panel.resume_polling()

@@ -57,6 +57,7 @@ class _UploadWorker(QThread):
         config: ScannerConfig,
         selected_systems: list[int],
         clear_first: bool = False,
+        scanner_model: str = "",
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -64,6 +65,7 @@ class _UploadWorker(QThread):
         self._config = config
         self._selected = selected_systems
         self._clear_first = clear_first
+        self._scanner_model = scanner_model
         self._abort = False
 
     def abort(self) -> None:
@@ -453,21 +455,28 @@ class _UploadWorker(QThread):
 
         if site_index != -1 and sys.trunk_frequencies:
             # Configure site via SIF (sets name, modulation, etc.)
-            # BCD996P2 SIF SET format (19 fields after index — superset of BCT15X):
-            #   name, qk, hld, lout, mod, att, C-CH(always 1), rsv, rsv, start_key,
-            #   lat, lon, range, gps, rsv, mot_type, edacs_type, p25waiting, rsv
-            # C-CH is "always 1:ON" per BCD996P2 spec; the BCT15X had "0" here
-            # and a BCT15X-specific STATE field ("00") where the spec now has rsv.
+            # Field format differs by model:
+            #   BCT15X / BCD996XT (17 fields): name,qk,hld,lout,mod,att,con_ch(0),
+            #     rsv,rsv,start_key,lat,lon,range,gps,state("00"),mot_type,rsv
+            #   BCD996P2 (19 fields): name,qk,hld,lout,mod,att,C-CH(1),rsv,rsv,
+            #     start_key,lat,lon,range,gps,rsv(""),mot_type,edacs_type,p25waiting,rsv
             site_name = "".join(c for c in (sys.name or "").strip() if c in _safe)[:16].strip()
+            _model = self._scanner_model.upper()
+            if _model == "BCD996P2":
+                sif_extra = ("", "STD", "", "", "")    # rsv, mot_type, edacs_type, p25waiting, rsv
+                sif_cch = "1"                          # C-CH always ON per BCD996P2 spec
+            else:
+                # BCT15X / BCD996XT / default
+                sif_extra = ("00", "STD", "")          # state, mot_type, trailing
+                sif_cch = "0"
             try:
                 proto.set_site_info(
                     site_index,
-                    site_name, ".", "0", "0",          # name, qk, hld, lout
-                    "AUTO", "0", "1", "", "",           # mod, att, C-CH(1=always ON), rsv, rsv
-                    ".",                                # start_key
-                    "00000000N", "00000000E", "", "0",  # lat, lon, range, gps
-                    "",                                 # rsv (BCT15X had STATE "00" here)
-                    "STD", "", "", "",                  # mot_type, edacs_type, p25waiting, rsv
+                    site_name, ".", "0", "0",           # name, qk, hld, lout
+                    "AUTO", "0", sif_cch, "", "",        # mod, att, C-CH, rsv, rsv
+                    ".",                                 # start_key
+                    "00000000N", "00000000E", "", "0",   # lat, lon, range, gps
+                    *sif_extra,
                 )
             except ProtocolError as e:
                 self.log_line.emit(f"  Warning: SIF error: {e}")
@@ -583,11 +592,13 @@ class UploadDialog(QDialog):
         self,
         proto: ScannerProtocol,
         config: ScannerConfig,
+        scanner_model: str = "",
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._proto = proto
         self._config = config
+        self._scanner_model = scanner_model
         self._worker: _UploadWorker | None = None
 
         self.setWindowTitle("Upload to Scanner")
@@ -696,7 +707,9 @@ class UploadDialog(QDialog):
         clear_first = self._clear_checkbox.isChecked()
         worker = _UploadWorker(
             self._proto, self._config, selected,
-            clear_first=clear_first, parent=self,
+            clear_first=clear_first,
+            scanner_model=self._scanner_model,
+            parent=self,
         )
         worker.progress.connect(self._progress.setValue)
         worker.log_line.connect(self._log.append)
