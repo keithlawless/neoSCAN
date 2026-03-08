@@ -309,6 +309,11 @@ class SystemsPanel(QWidget):
         self._config.systems[s_idx].groups.append(grp)
         self._config.modified = True
         self._rebuild_tree()
+        # Select the new group
+        g_idx_new = len(self._config.systems[s_idx].groups) - 1
+        sys_mi = self._model.index(s_idx, 0)
+        self._tree.expand(sys_mi)
+        self._tree.setCurrentIndex(self._model.index(g_idx_new, 0, sys_mi))
 
     def _on_add_channel(self) -> None:
         if not self._config:
@@ -325,6 +330,13 @@ class SystemsPanel(QWidget):
         self._config.systems[s_idx].groups[g_idx].channels.append(ch)
         self._config.modified = True
         self._rebuild_tree()
+        # Select the new channel
+        c_idx_new = len(self._config.systems[s_idx].groups[g_idx].channels) - 1
+        sys_mi = self._model.index(s_idx, 0)
+        self._tree.expand(sys_mi)
+        grp_mi = self._model.index(g_idx, 0, sys_mi)
+        self._tree.expand(grp_mi)
+        self._tree.setCurrentIndex(self._model.index(c_idx_new, 0, grp_mi))
 
     def _on_delete(self) -> None:
         if not self._config:
