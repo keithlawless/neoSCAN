@@ -236,6 +236,31 @@ def _help_label(field_key: str) -> QLabel:
 
 
 # ---------------------------------------------------------------------------
+# Duplicate frequency detection
+# ---------------------------------------------------------------------------
+def find_duplicate_channels(
+    config: ScannerConfig, freq_str: str, exclude_channel: Channel
+) -> list[tuple[str, str, str]]:
+    """Return (sys_name, grp_name, ch_name) for every Channel sharing freq_str."""
+    try:
+        target = float(freq_str)
+    except (ValueError, TypeError):
+        return []
+    results = []
+    for sys in config.systems:
+        for grp in sys.groups:
+            for ch in grp.channels:
+                if not isinstance(ch, Channel) or ch is exclude_channel:
+                    continue
+                try:
+                    if float(ch.frequency) == target:
+                        results.append((sys.name or "?", grp.name or "?", ch.name or "(unnamed)"))
+                except (ValueError, TypeError):
+                    pass
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Channel editor form
 # ---------------------------------------------------------------------------
 class ChannelEditorPanel(QWidget):
@@ -349,9 +374,31 @@ class ChannelEditorPanel(QWidget):
         e_freq = QLineEdit(ch.frequency)
         e_freq.setPlaceholderText("e.g. 154.2350")
         e_freq.setToolTip(HELP["freq"])
-        e_freq.textChanged.connect(lambda v: self._set_channel_field(s_idx, g_idx, c_idx, "frequency", v))
+        _dup_warning = QLabel()
+        _dup_warning.setStyleSheet("color: #cc6600; font-size: 11px;")
+        _dup_warning.setWordWrap(True)
+        _dup_warning.setVisible(False)
+
+        def _update_dup_warning(freq_str: str) -> None:
+            if self._config:
+                dups = find_duplicate_channels(self._config, freq_str, ch)
+                if dups:
+                    lines = "; ".join(f"{s} / {g} / {c}" for s, g, c in dups[:3])
+                    suffix = f" (+{len(dups) - 3} more)" if len(dups) > 3 else ""
+                    _dup_warning.setText(f"Duplicate frequency: {lines}{suffix}")
+                    _dup_warning.setVisible(True)
+                else:
+                    _dup_warning.setVisible(False)
+
+        def _on_freq_changed(v: str) -> None:
+            self._set_channel_field(s_idx, g_idx, c_idx, "frequency", v)
+            _update_dup_warning(v)
+
+        e_freq.textChanged.connect(_on_freq_changed)
         form.addRow("Frequency (MHz):", e_freq)
+        form.addRow("", _dup_warning)
         form.addRow("", _help_label("freq"))
+        _update_dup_warning(ch.frequency)
 
         # Modulation
         c_mod = QComboBox()

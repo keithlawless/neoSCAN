@@ -32,7 +32,7 @@ from app.ui.remote_control.control_panel import ControlPanel
 from app.ui.remote_control.log_panel import LogPanel
 from app.audio.transcriber import TranscriptionManager
 from app.data import file_996
-from app.data.models import ScannerConfig
+from app.data.models import ScannerConfig, Channel
 
 log = logging.getLogger(__name__)
 
@@ -375,6 +375,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Opened {Path(path).name} — {len(config.systems)} systems loaded", 5000
         )
+        self._check_and_warn_duplicates()
 
     def _on_file_save(self) -> None:
         if not self._config:
@@ -519,10 +520,34 @@ class MainWindow(QMainWindow):
             self._update_title()
             self._update_file_status()
             self._update_connection_ui()
+            self._check_and_warn_duplicates()
 
     # ------------------------------------------------------------------
     # Misc
     # ------------------------------------------------------------------
+
+    def _check_and_warn_duplicates(self) -> None:
+        """Post a status bar warning if any channels share a frequency."""
+        if not self._config:
+            return
+        from collections import defaultdict
+        freq_map: dict[float, list[str]] = defaultdict(list)
+        for sys in self._config.systems:
+            for grp in sys.groups:
+                for ch in grp.channels:
+                    if not isinstance(ch, Channel):
+                        continue
+                    try:
+                        freq_map[float(ch.frequency)].append(ch.name or "(unnamed)")
+                    except (ValueError, TypeError):
+                        pass
+        dup_count = sum(1 for v in freq_map.values() if len(v) > 1)
+        if dup_count:
+            noun = "frequencies" if dup_count != 1 else "frequency"
+            self.statusBar().showMessage(
+                f"Warning: {dup_count} duplicate {noun} detected — check Channel Editor for details",
+                8000,
+            )
 
     def _on_preferences(self) -> None:
         dlg = PreferencesDialog(parent=self)
