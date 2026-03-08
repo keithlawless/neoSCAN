@@ -29,6 +29,7 @@ from app.data.models import (
     ScannerConfig, System, Group, Channel, TalkGroup, TrunkFrequency,
     SYSTEM_TYPE_NAMES, SYS_TYPE_CONVENTIONAL, SYS_TYPE_MOTOROLA,
 )
+from app.data.band_plan import is_frequency_valid
 import uuid
 
 
@@ -39,7 +40,11 @@ HELP = {
     "freq": (
         "Frequency (MHz)\n\n"
         "Enter the frequency in MHz, e.g. 154.235 or 471.4250.\n\n"
-        "The BCT15-X supports: 25–512 MHz and 764–956 MHz.\n"
+        "Supported ranges vary by model. BCT15X/BCD996XT: 25–512, "
+        "764–776, 794–824, 849–869, 894–956, 1240–1300 MHz. "
+        "SDS200/SDS100: 25–512, 758–824, 849–869, 895–960, 1240–1300 MHz.\n"
+        "An inline warning appears if the frequency is outside the connected "
+        "scanner's range (SDS200 ranges are used when no scanner is connected).\n"
         "Step sizes are auto-selected based on band."
     ),
     "name": (
@@ -260,6 +265,21 @@ def find_duplicate_channels(
     return results
 
 
+def check_frequency_in_band(freq_str: str, model: str) -> str | None:
+    """Return a warning string if freq_str is outside the model's band plan,
+    or None if the frequency is valid or unparseable (don't warn while typing)."""
+    if not freq_str.strip():
+        return None
+    try:
+        freq = float(freq_str)
+    except (ValueError, TypeError):
+        return None
+    if is_frequency_valid(freq, model or "DEFAULT"):
+        return None
+    model_display = model if model else "SDS200 (default)"
+    return f"{freq:.4f} MHz is outside the supported range for {model_display}."
+
+
 # ---------------------------------------------------------------------------
 # Channel editor form
 # ---------------------------------------------------------------------------
@@ -276,6 +296,7 @@ class ChannelEditorPanel(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._config: ScannerConfig | None = None
+        self._scanner_model: str = ""
         self._context: tuple | None = None  # (type, s_idx, g_idx, c_idx)
         self._updating = False
         self._build_ui()
@@ -304,6 +325,10 @@ class ChannelEditorPanel(QWidget):
 
     def set_config(self, config: ScannerConfig | None) -> None:
         self._config = config
+
+    def set_scanner_model(self, model: str) -> None:
+        """Update the scanner model used for frequency range validation."""
+        self._scanner_model = model
 
     def show_channel(self, config: ScannerConfig, s_idx: int, g_idx: int, c_idx: int) -> None:
         self._config = config
@@ -379,6 +404,11 @@ class ChannelEditorPanel(QWidget):
         _dup_warning.setWordWrap(True)
         _dup_warning.setVisible(False)
 
+        _range_warning = QLabel()
+        _range_warning.setStyleSheet("color: #cc6600; font-size: 11px;")
+        _range_warning.setWordWrap(True)
+        _range_warning.setVisible(False)
+
         def _update_dup_warning(freq_str: str) -> None:
             if self._config:
                 dups = find_duplicate_channels(self._config, freq_str, ch)
@@ -390,15 +420,26 @@ class ChannelEditorPanel(QWidget):
                 else:
                     _dup_warning.setVisible(False)
 
+        def _update_range_warning(freq_str: str) -> None:
+            msg = check_frequency_in_band(freq_str, self._scanner_model)
+            if msg:
+                _range_warning.setText(msg)
+                _range_warning.setVisible(True)
+            else:
+                _range_warning.setVisible(False)
+
         def _on_freq_changed(v: str) -> None:
             self._set_channel_field(s_idx, g_idx, c_idx, "frequency", v)
             _update_dup_warning(v)
+            _update_range_warning(v)
 
         e_freq.textChanged.connect(_on_freq_changed)
         form.addRow("Frequency (MHz):", e_freq)
         form.addRow("", _dup_warning)
+        form.addRow("", _range_warning)
         form.addRow("", _help_label("freq"))
         _update_dup_warning(ch.frequency)
+        _update_range_warning(ch.frequency)
 
         # Modulation
         c_mod = QComboBox()

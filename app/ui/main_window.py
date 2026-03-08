@@ -72,6 +72,7 @@ class MainWindow(QMainWindow):
         self._current_port: str | None = None
         self._connect_worker: _ConnectWorker | None = None
         self._config: ScannerConfig | None = None
+        self._scanner_model: str = ""
         self._transcription_manager = TranscriptionManager(parent=self)
 
         self._build_menu()
@@ -451,6 +452,8 @@ class MainWindow(QMainWindow):
         self._conn = conn
         self._proto = ScannerProtocol(conn)
         self._current_port = port_name
+        self._scanner_model = model
+        self._channel_editor.set_scanner_model(model)
         self._update_connection_ui()
         self._status_model_label.setText(f"Model: {model}  FW: {version}")
         self.statusBar().showMessage(f"Connected to {model} on {port_name}", 5000)
@@ -473,6 +476,8 @@ class MainWindow(QMainWindow):
         self._conn = None
         self._proto = None
         self._current_port = None
+        self._scanner_model = ""
+        self._channel_editor.set_scanner_model("")
         self._update_connection_ui()
         self.statusBar().showMessage("Disconnected", 3000)
 
