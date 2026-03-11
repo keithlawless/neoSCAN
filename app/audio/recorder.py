@@ -7,6 +7,7 @@ captured audio as a float32 numpy array at 16 kHz (Whisper's native rate).
 """
 from __future__ import annotations
 
+import collections
 import logging
 import threading
 from typing import Optional
@@ -47,6 +48,26 @@ class AudioRecorder:
         self._chunks: list[np.ndarray] = []
         self._lock = threading.Lock()
         self._recording = False
+        self._passthrough: bool = False
+        self._out_device_index: Optional[int] = None
+        self._out_stream = None
+        self._pt_buffer: collections.deque = collections.deque()
+
+    def set_passthrough(self, enabled: bool, output_device_index: Optional[int]) -> None:
+        """Enable or disable real-time audio pass-through to an output device."""
+        if not enabled or output_device_index is None:
+            self._passthrough = False
+            self._close_out_stream()
+            self._pt_buffer.clear()
+            return
+        # Reopen output stream only if device changed
+        if output_device_index != self._out_device_index:
+            self._close_out_stream()
+            self._out_device_index = output_device_index
+            self._pt_buffer.clear()
+            if not self._open_out_stream():
+                return
+        self._passthrough = True
 
     def set_device(self, device_index: Optional[int]) -> None:
         """Set the input device index (from sounddevice.query_devices())."""
@@ -105,11 +126,47 @@ class AudioRecorder:
     def close(self) -> None:
         """Release audio resources. Call once on shutdown."""
         self._recording = False
+        self._passthrough = False
+        self._close_out_stream()
         self._close_stream()
 
     # ------------------------------------------------------------------
     # Private
     # ------------------------------------------------------------------
+
+    def _open_out_stream(self) -> bool:
+        """Open and start the pass-through output stream. Returns True on success."""
+        try:
+            import sounddevice as sd
+            self._out_stream = sd.OutputStream(
+                samplerate=SAMPLE_RATE,
+                channels=1,
+                dtype="float32",
+                device=self._out_device_index,
+                latency="low",
+                callback=self._output_callback,
+            )
+            self._out_stream.start()
+            log.debug("AudioRecorder: output stream opened on device %d", self._out_device_index)
+            return True
+        except Exception as exc:
+            self._out_stream = None
+            log.warning("AudioRecorder: failed to open output stream — %s", exc)
+            return False
+
+    def _close_out_stream(self) -> None:
+        """Stop and close the pass-through output stream."""
+        if self._out_stream is not None:
+            try:
+                self._out_stream.stop()
+            except Exception:
+                pass
+            try:
+                self._out_stream.close()
+            except Exception:
+                pass
+            self._out_stream = None
+            self._out_device_index = None
 
     def _open_stream(self) -> bool:
         """Open and start the persistent input stream. Returns True on success."""
@@ -160,7 +217,28 @@ class AudioRecorder:
         """sounddevice callback — runs on C audio thread."""
         if status:
             log.debug("AudioRecorder callback status: %s", status)
-        if not self._recording:
-            return
-        with self._lock:
-            self._chunks.append(indata.copy())
+        if self._recording:
+            with self._lock:
+                self._chunks.append(indata.copy())
+        if self._passthrough:
+            self._pt_buffer.append(indata.copy())
+
+    def _output_callback(
+        self,
+        outdata: np.ndarray,
+        frames: int,
+        time_info,
+        status,
+    ) -> None:
+        """sounddevice output callback — runs on C audio thread."""
+        try:
+            chunk = self._pt_buffer.popleft()
+            if len(chunk) >= frames:
+                outdata[:] = chunk[:frames].reshape(frames, 1)
+                if len(chunk) > frames:
+                    self._pt_buffer.appendleft(chunk[frames:])
+            else:
+                outdata[:len(chunk)] = chunk.reshape(-1, 1)
+                outdata[len(chunk):] = 0.0
+        except IndexError:
+            outdata[:] = 0.0

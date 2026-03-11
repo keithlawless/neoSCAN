@@ -161,6 +161,25 @@ class PreferencesDialog(QDialog):
         tx_form.addRow(self._tx_device_label, device_row)
         self._refresh_audio_devices()
 
+        # Pass-through
+        self._pt_enable = QCheckBox("Pass-through to speakers")
+        self._pt_enable.stateChanged.connect(self._on_pt_enable_changed)
+        self._pt_enable_label = QLabel("Audio pass-through:")
+        tx_form.addRow(self._pt_enable_label, self._pt_enable)
+
+        pt_device_row = QHBoxLayout()
+        self._pt_device_combo = QComboBox()
+        self._pt_device_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self._pt_device_combo.setMinimumWidth(200)
+        pt_refresh_btn = QPushButton("Refresh")
+        pt_refresh_btn.setFixedWidth(70)
+        pt_refresh_btn.clicked.connect(self._refresh_output_devices)
+        pt_device_row.addWidget(self._pt_device_combo, 1)
+        pt_device_row.addWidget(pt_refresh_btn)
+        self._pt_device_label = QLabel("Output device:")
+        tx_form.addRow(self._pt_device_label, pt_device_row)
+        self._refresh_output_devices()
+
         # Whisper model size
         self._tx_model_combo = QComboBox()
         self._tx_model_combo.addItems(["tiny", "base", "small", "medium", "large"])
@@ -232,6 +251,24 @@ class PreferencesDialog(QDialog):
                 self._tx_device_combo.setCurrentIndex(idx)
                 break
 
+    def _refresh_output_devices(self) -> None:
+        """Populate the audio output device combo from sounddevice."""
+        current_data = self._pt_device_combo.currentData()
+        self._pt_device_combo.clear()
+        self._pt_device_combo.addItem("(none)", None)
+        try:
+            import sounddevice as sd
+            devices = sd.query_devices()
+            for i, dev in enumerate(devices):
+                if dev["max_output_channels"] > 0:
+                    self._pt_device_combo.addItem(f"{i}: {dev['name']}", i)
+        except Exception:
+            self._pt_device_combo.addItem("(sounddevice not available)", None)
+        for idx in range(self._pt_device_combo.count()):
+            if self._pt_device_combo.itemData(idx) == current_data:
+                self._pt_device_combo.setCurrentIndex(idx)
+                break
+
     def _browse_transcript_dir(self) -> None:
         directory = QFileDialog.getExistingDirectory(
             self, "Select transcript directory", self._tx_dir_edit.text()
@@ -239,14 +276,21 @@ class PreferencesDialog(QDialog):
         if directory:
             self._tx_dir_edit.setText(directory)
 
+    def _on_pt_enable_changed(self, state: int) -> None:
+        pt_on = bool(state) and self._tx_enable.isChecked()
+        self._pt_device_label.setEnabled(pt_on)
+        self._pt_device_combo.setEnabled(pt_on)
+
     def _on_tx_enable_changed(self, state: int) -> None:
         enabled = bool(state)
         for w in (
             self._tx_device_label, self._tx_device_combo,
+            self._pt_enable_label, self._pt_enable,
             self._tx_model_label, self._tx_model_combo,
             self._tx_dir_label, self._tx_dir_edit,
         ):
             w.setEnabled(enabled)
+        self._on_pt_enable_changed(self._pt_enable.isChecked())
 
     # ------------------------------------------------------------------
     # Load / Save
@@ -288,6 +332,20 @@ class PreferencesDialog(QDialog):
                 self._tx_device_combo.setCurrentIndex(i)
                 break
 
+        pt_enabled = self._settings.value("transcription/passthrough_enabled", False, type=bool)
+        self._pt_enable.setChecked(pt_enabled)
+
+        saved_out_device = self._settings.value("transcription/output_device_index", None)
+        if saved_out_device is not None:
+            try:
+                saved_out_device = int(saved_out_device)
+            except (ValueError, TypeError):
+                saved_out_device = None
+        for i in range(self._pt_device_combo.count()):
+            if self._pt_device_combo.itemData(i) == saved_out_device:
+                self._pt_device_combo.setCurrentIndex(i)
+                break
+
         model_size = self._settings.value("transcription/model_size", "base")
         idx = self._tx_model_combo.findText(model_size)
         if idx >= 0:
@@ -306,6 +364,10 @@ class PreferencesDialog(QDialog):
         self._settings.setValue("transcription/enabled", self._tx_enable.isChecked())
         self._settings.setValue("transcription/device_index",
                                 self._tx_device_combo.currentData())
+        self._settings.setValue("transcription/passthrough_enabled",
+                                self._pt_enable.isChecked())
+        self._settings.setValue("transcription/output_device_index",
+                                self._pt_device_combo.currentData())
         self._settings.setValue("transcription/model_size",
                                 self._tx_model_combo.currentText())
         self._settings.setValue("transcription/transcript_dir", self._tx_dir_edit.text())

@@ -216,6 +216,15 @@ class TranscriptionManager(QObject):
                 device_index = None
         self._recorder.set_device(device_index)
 
+        pt_enabled = settings.value("transcription/passthrough_enabled", False, type=bool)
+        out_device_index = settings.value("transcription/output_device_index", None)
+        if out_device_index is not None:
+            try:
+                out_device_index = int(out_device_index)
+            except (ValueError, TypeError):
+                out_device_index = None
+        self._recorder.set_passthrough(pt_enabled, out_device_index)
+
         transcript_dir = settings.value("transcription/transcript_dir", "")
         self._writer.set_directory(transcript_dir)
 
