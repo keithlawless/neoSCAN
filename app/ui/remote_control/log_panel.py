@@ -163,7 +163,7 @@ class LogPanel(QWidget):
             entry.transcript = text
             entry.transcript_pending = False
             self._refresh_row(row_index)
-            if self._transcription_manager:
+            if self._transcription_manager and job is not None:
                 self._transcription_manager.on_transcription_done(row_index, text, job)
         except Exception:
             log.exception("Error handling transcription result for row %d", row_index)

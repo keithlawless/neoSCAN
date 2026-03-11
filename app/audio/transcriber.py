@@ -242,6 +242,7 @@ class TranscriptionManager(QObject):
         audio = self._recorder.stop_recording()
         if audio is None:
             log.debug("TranscriptionManager: no audio captured for row %d", row_index)
+            self.transcription_ready.emit(row_index, "", None)
             return
         if self._worker is None or self._model is None:
             log.warning("TranscriptionManager: model not ready — dropping job for row %d",

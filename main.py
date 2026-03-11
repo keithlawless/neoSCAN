@@ -30,6 +30,9 @@ logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
 )
+# Suppress verbose debug output from the serial protocol layer so that
+# audio transcription debug messages are easier to see.
+logging.getLogger("app.serial.protocol").setLevel(logging.WARNING)
 
 _ROOT = Path(__file__).resolve().parent
 _ICON_PATH = _ROOT / "resources" / "icons" / "neoscan.png"
