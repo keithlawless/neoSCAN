@@ -236,6 +236,10 @@ class TranscriptionManager(QObject):
             # Keep model in memory if already loaded — just don't use it
             log.debug("TranscriptionManager: transcription disabled")
 
+    def recapture_noise_profile(self) -> None:
+        """Discard the pass-through noise profile and capture a fresh one."""
+        self._recorder.recapture_noise_profile()
+
     def on_transmission_started(self) -> None:
         if not self._enabled:
             return

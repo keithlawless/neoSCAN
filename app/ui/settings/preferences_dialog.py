@@ -78,11 +78,12 @@ def apply_theme(theme: str) -> None:
 
 
 class PreferencesDialog(QDialog):
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, on_recapture_noise_profile=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Preferences")
         self.setMinimumWidth(480)
         self._settings = load_prefs()
+        self._on_recapture_noise_profile = on_recapture_noise_profile
         self._build_ui()
         self._load_values()
 
@@ -180,6 +181,15 @@ class PreferencesDialog(QDialog):
         tx_form.addRow(self._pt_device_label, pt_device_row)
         self._refresh_output_devices()
 
+        self._pt_recapture_btn = QPushButton("Re-capture noise profile")
+        self._pt_recapture_btn.setToolTip(
+            "Discard the current noise profile and capture a new one.\n"
+            "Trigger while the scanner is in squelch for best results."
+        )
+        self._pt_recapture_btn.clicked.connect(self._on_recapture_clicked)
+        self._pt_recapture_label = QLabel("")
+        tx_form.addRow(self._pt_recapture_label, self._pt_recapture_btn)
+
         # Whisper model size
         self._tx_model_combo = QComboBox()
         self._tx_model_combo.addItems(["tiny", "base", "small", "medium", "large"])
@@ -276,10 +286,15 @@ class PreferencesDialog(QDialog):
         if directory:
             self._tx_dir_edit.setText(directory)
 
+    def _on_recapture_clicked(self) -> None:
+        if self._on_recapture_noise_profile is not None:
+            self._on_recapture_noise_profile()
+
     def _on_pt_enable_changed(self, state: int) -> None:
         pt_on = bool(state) and self._tx_enable.isChecked()
-        self._pt_device_label.setEnabled(pt_on)
-        self._pt_device_combo.setEnabled(pt_on)
+        for w in (self._pt_device_label, self._pt_device_combo,
+                  self._pt_recapture_label, self._pt_recapture_btn):
+            w.setEnabled(pt_on)
 
     def _on_tx_enable_changed(self, state: int) -> None:
         enabled = bool(state)
@@ -290,7 +305,8 @@ class PreferencesDialog(QDialog):
             self._tx_dir_label, self._tx_dir_edit,
         ):
             w.setEnabled(enabled)
-        self._on_pt_enable_changed(self._pt_enable.isChecked())
+        # pt sub-widgets depend on both tx enabled AND pt checked
+        self._on_pt_enable_changed(self._pt_enable.checkState())
 
     # ------------------------------------------------------------------
     # Load / Save

@@ -10,6 +10,7 @@ from __future__ import annotations
 import collections
 import logging
 import threading
+import time
 from typing import Optional
 
 import numpy as np
@@ -18,6 +19,7 @@ log = logging.getLogger(__name__)
 
 SAMPLE_RATE = 16_000       # Hz — Whisper's native sample rate
 MIN_DURATION_SEC = 1.0     # discard recordings shorter than this
+_NOISE_PROFILE_SECS = 2.0  # seconds of squelch audio used to build noise profile
 
 
 class AudioRecorder:
@@ -40,6 +42,14 @@ class AudioRecorder:
     are visible to the callback quickly enough for this use case — the worst
     case is one extra chunk appended after stop_recording() returns, which is
     harmless because we take a snapshot of _chunks under the lock.
+
+    Pass-through pipeline:
+        input callback → _pt_raw_buffer → processing thread (NR) → _pt_out_buffer → output callback
+
+    The processing thread accumulates the first _NOISE_PROFILE_SECS of audio
+    as a noise profile, then applies noisereduce per-chunk.  Audio passes
+    through unprocessed while the profile is being captured.  If noisereduce
+    is not installed, audio passes through without filtering.
     """
 
     def __init__(self) -> None:
@@ -48,26 +58,59 @@ class AudioRecorder:
         self._chunks: list[np.ndarray] = []
         self._lock = threading.Lock()
         self._recording = False
+
+        # Pass-through state
         self._passthrough: bool = False
         self._out_device_index: Optional[int] = None
         self._out_stream = None
-        self._pt_buffer: collections.deque = collections.deque()
+        self._pt_raw_buffer: collections.deque = collections.deque()
+        self._pt_out_buffer: collections.deque = collections.deque()
+
+        # Noise profile (built from the first few seconds of pass-through audio)
+        self._noise_profile: Optional[np.ndarray] = None
+        self._noise_accum: list[np.ndarray] = []
+        self._noise_ready: bool = False
+
+        # Processing thread
+        self._pt_thread: Optional[threading.Thread] = None
+        self._pt_thread_running: bool = False
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def set_passthrough(self, enabled: bool, output_device_index: Optional[int]) -> None:
         """Enable or disable real-time audio pass-through to an output device."""
         if not enabled or output_device_index is None:
             self._passthrough = False
+            self._stop_pt_thread()
             self._close_out_stream()
-            self._pt_buffer.clear()
+            self._pt_raw_buffer.clear()
+            self._pt_out_buffer.clear()
             return
         # Reopen output stream only if device changed
         if output_device_index != self._out_device_index:
+            self._passthrough = False
+            self._stop_pt_thread()
             self._close_out_stream()
             self._out_device_index = output_device_index
-            self._pt_buffer.clear()
+            self._pt_raw_buffer.clear()
+            self._pt_out_buffer.clear()
+            self._reset_noise_profile()
             if not self._open_out_stream():
                 return
+            self._start_pt_thread()
         self._passthrough = True
+
+    def recapture_noise_profile(self) -> None:
+        """Discard the current noise profile and begin capturing a new one.
+
+        Call while the scanner is in squelch for best results.  The new
+        profile will be ready after _NOISE_PROFILE_SECS seconds.
+        """
+        self._reset_noise_profile()
+        log.info("AudioRecorder: noise profile reset — capturing new profile over %.0fs",
+                 _NOISE_PROFILE_SECS)
 
     def set_device(self, device_index: Optional[int]) -> None:
         """Set the input device index (from sounddevice.query_devices())."""
@@ -127,11 +170,100 @@ class AudioRecorder:
         """Release audio resources. Call once on shutdown."""
         self._recording = False
         self._passthrough = False
+        self._stop_pt_thread()
         self._close_out_stream()
         self._close_stream()
 
     # ------------------------------------------------------------------
-    # Private
+    # Private — noise profile
+    # ------------------------------------------------------------------
+
+    def _reset_noise_profile(self) -> None:
+        self._noise_profile = None
+        self._noise_accum = []
+        self._noise_ready = False
+
+    # ------------------------------------------------------------------
+    # Private — processing thread
+    # ------------------------------------------------------------------
+
+    def _start_pt_thread(self) -> None:
+        self._pt_thread_running = True
+        self._pt_thread = threading.Thread(
+            target=self._pt_processing_loop, daemon=True, name="pt-nr"
+        )
+        self._pt_thread.start()
+
+    def _stop_pt_thread(self) -> None:
+        self._pt_thread_running = False
+        if self._pt_thread is not None:
+            self._pt_thread.join(timeout=1.0)
+            self._pt_thread = None
+
+    def _pt_processing_loop(self) -> None:
+        """
+        Background thread: reads raw chunks, applies noise reduction, writes
+        to the output buffer consumed by the output callback.
+
+        During the initial _NOISE_PROFILE_SECS window, audio passes through
+        unprocessed while the noise profile is accumulated.  After that, each
+        chunk is filtered using the pre-computed profile.  Falls back to
+        passthrough if noisereduce is not installed.
+        """
+        try:
+            import noisereduce as nr
+            nr_available = True
+        except ImportError:
+            log.debug("noisereduce not installed — pass-through without noise reduction")
+            nr_available = False
+
+        while self._pt_thread_running:
+            try:
+                chunk = self._pt_raw_buffer.popleft()
+            except IndexError:
+                time.sleep(0.005)
+                continue
+
+            # No noisereduce: pass through unchanged
+            if not nr_available:
+                self._pt_out_buffer.append(chunk)
+                continue
+
+            # Still building the noise profile: accumulate and pass through raw
+            if not self._noise_ready:
+                self._noise_accum.append(chunk.flatten())
+                total = sum(len(c) for c in self._noise_accum)
+                if total >= int(_NOISE_PROFILE_SECS * SAMPLE_RATE):
+                    self._noise_profile = np.concatenate(self._noise_accum)
+                    self._noise_ready = True
+                    self._noise_accum.clear()
+                    log.info(
+                        "AudioRecorder: noise profile captured (%.1fs) — "
+                        "pass-through noise reduction active",
+                        _NOISE_PROFILE_SECS,
+                    )
+                self._pt_out_buffer.append(chunk)
+                continue
+
+            # Apply noise reduction using the pre-computed profile
+            try:
+                flat = chunk.flatten()
+                processed = nr.reduce_noise(
+                    y=flat,
+                    sr=SAMPLE_RATE,
+                    y_noise=self._noise_profile,
+                    prop_decrease=0.9,
+                    stationary=True,
+                )
+                self._pt_out_buffer.append(
+                    processed.reshape(chunk.shape).astype(np.float32)
+                )
+            except Exception as exc:
+                log.debug("Pass-through NR error — passing raw: %s", exc)
+                self._pt_out_buffer.append(chunk)
+
+    # ------------------------------------------------------------------
+    # Private — streams
     # ------------------------------------------------------------------
 
     def _open_out_stream(self) -> bool:
@@ -207,6 +339,10 @@ class AudioRecorder:
                 pass
             self._stream = None
 
+    # ------------------------------------------------------------------
+    # Private — callbacks
+    # ------------------------------------------------------------------
+
     def _audio_callback(
         self,
         indata: np.ndarray,
@@ -214,14 +350,14 @@ class AudioRecorder:
         time_info,
         status,
     ) -> None:
-        """sounddevice callback — runs on C audio thread."""
+        """sounddevice input callback — runs on C audio thread."""
         if status:
             log.debug("AudioRecorder callback status: %s", status)
         if self._recording:
             with self._lock:
                 self._chunks.append(indata.copy())
         if self._passthrough:
-            self._pt_buffer.append(indata.copy())
+            self._pt_raw_buffer.append(indata.copy())
 
     def _output_callback(
         self,
@@ -232,11 +368,11 @@ class AudioRecorder:
     ) -> None:
         """sounddevice output callback — runs on C audio thread."""
         try:
-            chunk = self._pt_buffer.popleft()
+            chunk = self._pt_out_buffer.popleft()
             if len(chunk) >= frames:
                 outdata[:] = chunk[:frames].reshape(frames, 1)
                 if len(chunk) > frames:
-                    self._pt_buffer.appendleft(chunk[frames:])
+                    self._pt_out_buffer.appendleft(chunk[frames:])
             else:
                 outdata[:len(chunk)] = chunk.reshape(-1, 1)
                 outdata[len(chunk):] = 0.0
