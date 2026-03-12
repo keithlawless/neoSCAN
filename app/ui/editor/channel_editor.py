@@ -720,6 +720,19 @@ class ChannelEditorPanel(QWidget):
         form.addRow("ID Display:", c_mot_id)
         form.addRow("", _help_label("mot_id_display"))
 
+        c_rec = QComboBox()
+        c_rec.addItem("Off (no recording)", userData="0")
+        c_rec.addItem("Marked channels only", userData="1")
+        c_rec.addItem("All channels", userData="2")
+        cur_rec = c_rec.findData(sys.record_mode or "0")
+        c_rec.setCurrentIndex(cur_rec if cur_rec >= 0 else 0)
+        c_rec.setToolTip(HELP["sys_record_mode"])
+        c_rec.currentIndexChanged.connect(
+            lambda _: self._set_system_field(s_idx, "record_mode", c_rec.currentData())
+        )
+        form.addRow("Record Mode:", c_rec)
+        form.addRow("", _help_label("sys_record_mode"))
+
         cb_lockout = QCheckBox("Locked out (skip this system)")
         cb_lockout.setChecked(sys.lockout)
         cb_lockout.setToolTip(HELP["lockout"])
