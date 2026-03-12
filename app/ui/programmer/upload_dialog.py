@@ -643,10 +643,10 @@ class _UploadWorker(QThread):
         tg_count = 0
 
         # --- TRN: trunking parameters ---
-        # P25 TRN SET (28 params after index):
+        # P25 TRN SET (25 params after index — same layout as Motorola):
         # ID_SEARCH, S_BIT, END_CODE, AFS, RSV×2, EMG, EMGL, FMAP, CTM_FMAP,
-        # RSV×9, TGID_GRP_HEAD(0), TGID_GRP_TAIL(0), ID_LOUT×2(0),
-        # MOT_ID, EMG_COLOR, EMG_PATTERN, P25NAC, PRI_ID_SCAN
+        # RSV×10, MOT_ID, EMG_COLOR, EMG_PATTERN, P25NAC, PRI_ID_SCAN
+        # (TGID_GRP_HEAD/TAIL and ID_LOUT are GET-only fields, not sent in SET)
         emg_level = sys.emg_alert_level or "0"
         try:
             proto.set_trunking_params(
@@ -663,15 +663,12 @@ class _UploadWorker(QThread):
                 "0", "0", "0",                          # 11-13. RSV
                 "0", "0", "0",                          # 14-16. RSV
                 "0", "0", "0",                          # 17-19. RSV
-                "0",                                    # 20. TGID_GRP_HEAD (scanner fills)
-                "0",                                    # 21. TGID_GRP_TAIL
-                "0",                                    # 22. ID_LOUT_GRP_HEAD
-                "0",                                    # 23. ID_LOUT_GRP_TAIL
-                "0",                                    # 24. MOT_ID (0=Decimal)
-                "OFF",                                  # 25. EMG_COLOR
-                "0",                                    # 26. EMG_PATTERN
-                sys.p25_nac or "SRCH",                  # 27. P25NAC
-                "0",                                    # 28. PRI_ID_SCAN
+                "0",                                    # 20. RSV (10th reserved)
+                "0",                                    # 21. MOT_ID (0=Decimal)
+                "OFF",                                  # 22. EMG_COLOR
+                "0",                                    # 23. EMG_PATTERN
+                sys.p25_nac or "SRCH",                  # 24. P25NAC
+                "0",                                    # 25. PRI_ID_SCAN
             )
         except ProtocolError as e:
             self.log_line.emit(f"  Warning: TRN error: {e}")
