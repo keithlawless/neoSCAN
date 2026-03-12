@@ -332,7 +332,10 @@ class ControlPanel(QWidget):
 
         if freq:
             try:
-                freq_str = f"{float(freq):.4f} MHz"
+                if "." in freq:
+                    freq_str = f"{float(freq):.4f} MHz"
+                else:
+                    freq_str = f"TGID {int(float(freq))}"
             except ValueError:
                 freq_str = freq
         else:

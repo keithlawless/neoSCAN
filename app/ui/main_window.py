@@ -555,7 +555,10 @@ class MainWindow(QMainWindow):
             )
 
     def _on_preferences(self) -> None:
-        dlg = PreferencesDialog(parent=self)
+        dlg = PreferencesDialog(
+            parent=self,
+            on_recapture_noise_profile=self._transcription_manager.recapture_noise_profile,
+        )
         if dlg.exec():
             settings = load_prefs()
             apply_theme(settings.value("appearance/theme", "System default"))

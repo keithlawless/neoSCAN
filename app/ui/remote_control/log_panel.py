@@ -39,7 +39,7 @@ COL_SYS = 4
 COL_GRP = 5
 COL_MOD = 6
 COL_TRANSCRIPT = 7
-HEADERS = ["Time", "Duration", "Channel", "Frequency", "System", "Group", "Mod", "Transcript"]
+HEADERS = ["Time", "Duration", "Channel", "Freq / TGID", "System", "Group", "Mod", "Transcript"]
 
 
 class _TransmissionEntry:
@@ -63,6 +63,15 @@ class _TransmissionEntry:
         return f"{secs:.1f}s"
 
     def freq_display(self) -> str:
+        if not self.frequency:
+            return ""
+        # GLG field[0] is "FRQ/TGID": conventional frequencies have a decimal
+        # point ("154.2350"), trunked TGIDs are plain integers ("33840").
+        if "." not in self.frequency:
+            try:
+                return f"TGID {int(float(self.frequency))}"
+            except (ValueError, TypeError):
+                return self.frequency
         try:
             return f"{float(self.frequency):.4f} MHz"
         except (ValueError, TypeError):

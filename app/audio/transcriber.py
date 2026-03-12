@@ -24,6 +24,7 @@ from PyQt6.QtCore import (
     pyqtSlot,
 )
 
+from app.audio.languages import DEFAULT_LANGUAGE, WHISPER_LANGUAGES  # noqa: F401 (re-exported)
 from app.audio.recorder import AudioRecorder, SAMPLE_RATE
 from app.audio.transcript_writer import TranscriptWriter
 from app.ui.settings.preferences_dialog import load_prefs
@@ -31,6 +32,7 @@ from app.ui.settings.preferences_dialog import load_prefs
 log = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "base"
+_DEFAULT_LANGUAGE = DEFAULT_LANGUAGE
 _MAX_QUEUE_DEPTH = 5    # drop new jobs rather than let memory and latency grow unbounded
 _MAX_AUDIO_SECS = 60    # truncate clips longer than this before noise reduction and Whisper
 
@@ -105,13 +107,18 @@ class TranscriberWorker(QThread):
 
     transcription_ready = pyqtSignal(int, str, object)
 
-    def __init__(self, model, parent=None) -> None:
+    def __init__(self, model, language: Optional[str] = _DEFAULT_LANGUAGE, parent=None) -> None:
         super().__init__(parent)
         self._model = model
+        self._language: Optional[str] = language
         self._queue: list[_TranscriptionJob] = []
         self._mutex = QMutex()
         self._cond = QWaitCondition()
         self._running = True
+
+    def set_language(self, language: Optional[str]) -> None:
+        """Update the transcription language. Takes effect on the next job."""
+        self._language = language
 
     def enqueue(self, job: _TranscriptionJob) -> None:
         with QMutexLocker(self._mutex):
@@ -153,18 +160,41 @@ class TranscriberWorker(QThread):
                       len(raw) / SAMPLE_RATE, _MAX_AUDIO_SECS, job.row_index)
             raw = raw[:max_samples]
         duration = len(raw) / SAMPLE_RATE
+        peak = float(np.max(np.abs(raw)))
         try:
-            log.info("Transcribing row %d (%.1fs of audio)…",
-                     job.row_index, duration)
-            audio = _reduce_noise(raw)
+            log.info("Transcribing row %d (%.1fs, peak=%.4f, language=%s)…",
+                     job.row_index, duration, peak, self._language or "auto")
+            if peak < 0.001:
+                log.warning(
+                    "Transcription row %d: audio peak %.4f is extremely low — "
+                    "check input device gain and cable connection",
+                    job.row_index, peak,
+                )
+            # Normalize to a consistent peak level so Whisper's VAD always
+            # sees adequate signal regardless of input gain or system type.
+            normalized = raw / peak if peak > 0.0 else raw
+            # Pad with 1 s of silence so Whisper flushes the final segment.
+            # Without this, audio that ends abruptly (squelch closing mid-word)
+            # is often dropped from the last incomplete segment.
+            padded = np.concatenate([normalized,
+                                     np.zeros(SAMPLE_RATE, dtype=np.float32)])
+            audio = _reduce_noise(padded)
             result = self._model.transcribe(
                 audio,
                 fp16=False,
-                language="en",
+                language=self._language,
+                condition_on_previous_text=False,
+                no_speech_threshold=0.8,
             )
+            for seg in result.get("segments", []):
+                log.debug(
+                    "  row %d seg [%.1f-%.1fs] no_speech_prob=%.3f %r",
+                    job.row_index, seg["start"], seg["end"],
+                    seg.get("no_speech_prob", 0), seg["text"][:80],
+                )
             text = result.get("text", "").strip()
             if text:
-                log.info("Transcription row %d: %r", job.row_index, text[:80])
+                log.info("Transcription row %d: %r", job.row_index, text[:200])
             else:
                 log.warning(
                     "Transcription row %d: Whisper returned empty text for %.1fs of "
@@ -198,6 +228,7 @@ class TranscriptionManager(QObject):
         self._model = None
         self._enabled = False
         self._current_model_size = ""
+        self._current_language: Optional[str] = _DEFAULT_LANGUAGE
 
     # ------------------------------------------------------------------
     # Public API
@@ -216,8 +247,23 @@ class TranscriptionManager(QObject):
                 device_index = None
         self._recorder.set_device(device_index)
 
+        pt_enabled = settings.value("transcription/passthrough_enabled", False, type=bool)
+        out_device_index = settings.value("transcription/output_device_index", None)
+        if out_device_index is not None:
+            try:
+                out_device_index = int(out_device_index)
+            except (ValueError, TypeError):
+                out_device_index = None
+        self._recorder.set_passthrough(pt_enabled, out_device_index)
+
         transcript_dir = settings.value("transcription/transcript_dir", "")
         self._writer.set_directory(transcript_dir)
+
+        language = settings.value("transcription/language", _DEFAULT_LANGUAGE) or None
+        if language != self._current_language:
+            self._current_language = language
+            if self._worker is not None:
+                self._worker.set_language(language)
 
         model_size = settings.value("transcription/model_size", _DEFAULT_MODEL)
         if self._enabled and model_size != self._current_model_size:
@@ -226,6 +272,10 @@ class TranscriptionManager(QObject):
         if not self._enabled:
             # Keep model in memory if already loaded — just don't use it
             log.debug("TranscriptionManager: transcription disabled")
+
+    def recapture_noise_profile(self) -> None:
+        """Discard the pass-through noise profile and capture a fresh one."""
+        self._recorder.recapture_noise_profile()
 
     def on_transmission_started(self) -> None:
         if not self._enabled:
@@ -306,7 +356,7 @@ class TranscriptionManager(QObject):
     def _on_model_loaded(self, model) -> None:
         self._model = model
         self._loader = None
-        self._worker = TranscriberWorker(model, parent=self)
+        self._worker = TranscriberWorker(model, language=self._current_language, parent=self)
         # Use an explicit slot (not signal-to-signal) so Qt's auto-connection
         # correctly marshals the call to the main thread via a queued connection.
         self._worker.transcription_ready.connect(self._on_worker_transcription_ready)
