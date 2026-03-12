@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
 )
 
-from app.data.models import ScannerConfig, System, Group, Channel, TalkGroup
+from app.data.models import ScannerConfig, System, Group, Channel, TalkGroup, TrunkFrequency
 
 
 # Custom item roles
@@ -315,9 +315,13 @@ class SystemsPanel(QWidget):
             return
         import uuid
         from app.data.models import Group
+        sys_obj = self._config.systems[s_idx]
         grp = Group()
         grp.name = "New Group"
         grp.group_id = uuid.uuid4().hex[:16].upper()
+        # Trunked systems use TGID groups (type "2"); conventional uses type "2" by default
+        if sys_obj.is_motorola or sys_obj.is_p25:
+            grp.group_type = "2"
         self._config.systems[s_idx].groups.append(grp)
         self._config.modified = True
         self._rebuild_tree()
@@ -333,13 +337,21 @@ class SystemsPanel(QWidget):
         s_idx, g_idx, _ = self._current_indices()
         if s_idx is None or g_idx is None:
             return
-        from app.data.models import Channel
-        ch = Channel()
-        ch.name = "New Channel"
-        ch.frequency = "0.0"
-        ch.modulation = "FM"
-        ch.group_id = self._config.systems[s_idx].groups[g_idx].group_id
-        self._config.systems[s_idx].groups[g_idx].channels.append(ch)
+        sys_obj = self._config.systems[s_idx]
+        grp_obj = sys_obj.groups[g_idx]
+        if sys_obj.is_motorola or sys_obj.is_p25:
+            from app.data.models import TalkGroup
+            ch = TalkGroup()
+            ch.name = "New Talk Group"
+            ch.tgid = "0"
+        else:
+            from app.data.models import Channel
+            ch = Channel()
+            ch.name = "New Channel"
+            ch.frequency = "0.0"
+            ch.modulation = "FM"
+        ch.group_id = grp_obj.group_id
+        grp_obj.channels.append(ch)
         self._config.modified = True
         self._rebuild_tree()
         # Select the new channel
