@@ -160,10 +160,20 @@ class TranscriberWorker(QThread):
                       len(raw) / SAMPLE_RATE, _MAX_AUDIO_SECS, job.row_index)
             raw = raw[:max_samples]
         duration = len(raw) / SAMPLE_RATE
+        peak = float(np.max(np.abs(raw)))
         try:
-            log.info("Transcribing row %d (%.1fs of audio, language=%s)…",
-                     job.row_index, duration, self._language or "auto")
-            audio = _reduce_noise(raw)
+            log.info("Transcribing row %d (%.1fs, peak=%.4f, language=%s)…",
+                     job.row_index, duration, peak, self._language or "auto")
+            if peak < 0.001:
+                log.warning(
+                    "Transcription row %d: audio peak %.4f is extremely low — "
+                    "check input device gain and cable connection",
+                    job.row_index, peak,
+                )
+            # Normalize to a consistent peak level so Whisper's VAD always
+            # sees adequate signal regardless of input gain or system type.
+            normalized = raw / peak if peak > 0.0 else raw
+            audio = _reduce_noise(normalized)
             result = self._model.transcribe(
                 audio,
                 fp16=False,
