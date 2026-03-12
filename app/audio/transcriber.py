@@ -179,7 +179,14 @@ class TranscriberWorker(QThread):
                 fp16=False,
                 language=self._language,
                 condition_on_previous_text=False,
+                no_speech_threshold=0.8,
             )
+            for seg in result.get("segments", []):
+                log.debug(
+                    "  row %d seg [%.1f-%.1fs] no_speech_prob=%.3f %r",
+                    job.row_index, seg["start"], seg["end"],
+                    seg.get("no_speech_prob", 0), seg["text"][:60],
+                )
             text = result.get("text", "").strip()
             if text:
                 log.info("Transcription row %d: %r", job.row_index, text[:80])
