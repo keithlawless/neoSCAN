@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from app.audio.transcriber import WHISPER_LANGUAGES, _DEFAULT_LANGUAGE
+from app.audio.languages import DEFAULT_LANGUAGE, WHISPER_LANGUAGES
 from app.serial.port_manager import list_ports
 
 
@@ -378,7 +378,7 @@ class PreferencesDialog(QDialog):
         if idx >= 0:
             self._tx_model_combo.setCurrentIndex(idx)
 
-        saved_lang = self._settings.value("transcription/language", _DEFAULT_LANGUAGE)
+        saved_lang = self._settings.value("transcription/language", DEFAULT_LANGUAGE)
         for i in range(self._tx_lang_combo.count()):
             if self._tx_lang_combo.itemData(i) == saved_lang:
                 self._tx_lang_combo.setCurrentIndex(i)

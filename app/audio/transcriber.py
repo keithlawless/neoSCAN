@@ -24,6 +24,7 @@ from PyQt6.QtCore import (
     pyqtSlot,
 )
 
+from app.audio.languages import DEFAULT_LANGUAGE, WHISPER_LANGUAGES  # noqa: F401 (re-exported)
 from app.audio.recorder import AudioRecorder, SAMPLE_RATE
 from app.audio.transcript_writer import TranscriptWriter
 from app.ui.settings.preferences_dialog import load_prefs
@@ -31,45 +32,7 @@ from app.ui.settings.preferences_dialog import load_prefs
 log = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "base"
-_DEFAULT_LANGUAGE = "en"
-
-# All languages supported by Whisper, as (display_name, language_code) pairs.
-# Sorted alphabetically; used to populate the language selector in Preferences.
-WHISPER_LANGUAGES: list[tuple[str, str]] = sorted([
-    ("Afrikaans", "af"), ("Albanian", "sq"), ("Amharic", "am"),
-    ("Arabic", "ar"), ("Armenian", "hy"), ("Assamese", "as"),
-    ("Azerbaijani", "az"), ("Bashkir", "ba"), ("Basque", "eu"),
-    ("Belarusian", "be"), ("Bengali", "bn"), ("Bosnian", "bs"),
-    ("Breton", "br"), ("Bulgarian", "bg"), ("Burmese", "my"),
-    ("Catalan", "ca"), ("Chinese", "zh"), ("Croatian", "hr"),
-    ("Czech", "cs"), ("Danish", "da"), ("Dutch", "nl"),
-    ("English", "en"), ("Estonian", "et"), ("Faroese", "fo"),
-    ("Finnish", "fi"), ("French", "fr"), ("Galician", "gl"),
-    ("Georgian", "ka"), ("German", "de"), ("Greek", "el"),
-    ("Gujarati", "gu"), ("Haitian Creole", "ht"), ("Hausa", "ha"),
-    ("Hawaiian", "haw"), ("Hebrew", "he"), ("Hindi", "hi"),
-    ("Hungarian", "hu"), ("Icelandic", "is"), ("Indonesian", "id"),
-    ("Italian", "it"), ("Japanese", "ja"), ("Javanese", "jw"),
-    ("Kannada", "kn"), ("Kazakh", "kk"), ("Khmer", "km"),
-    ("Korean", "ko"), ("Lao", "lo"), ("Latin", "la"),
-    ("Latvian", "lv"), ("Lingala", "ln"), ("Lithuanian", "lt"),
-    ("Luxembourgish", "lb"), ("Macedonian", "mk"), ("Malagasy", "mg"),
-    ("Malay", "ms"), ("Malayalam", "ml"), ("Maltese", "mt"),
-    ("Maori", "mi"), ("Marathi", "mr"), ("Mongolian", "mn"),
-    ("Nepali", "ne"), ("Norwegian", "no"), ("Nynorsk", "nn"),
-    ("Occitan", "oc"), ("Pashto", "ps"), ("Persian", "fa"),
-    ("Polish", "pl"), ("Portuguese", "pt"), ("Punjabi", "pa"),
-    ("Romanian", "ro"), ("Russian", "ru"), ("Sanskrit", "sa"),
-    ("Serbian", "sr"), ("Shona", "sn"), ("Sindhi", "sd"),
-    ("Sinhala", "si"), ("Slovak", "sk"), ("Slovenian", "sl"),
-    ("Somali", "so"), ("Spanish", "es"), ("Sundanese", "su"),
-    ("Swahili", "sw"), ("Swedish", "sv"), ("Tagalog", "tl"),
-    ("Tajik", "tg"), ("Tamil", "ta"), ("Tatar", "tt"),
-    ("Telugu", "te"), ("Thai", "th"), ("Tibetan", "bo"),
-    ("Turkish", "tr"), ("Turkmen", "tk"), ("Ukrainian", "uk"),
-    ("Urdu", "ur"), ("Uzbek", "uz"), ("Vietnamese", "vi"),
-    ("Welsh", "cy"), ("Yiddish", "yi"), ("Yoruba", "yo"),
-], key=lambda x: x[0])
+_DEFAULT_LANGUAGE = DEFAULT_LANGUAGE
 _MAX_QUEUE_DEPTH = 5    # drop new jobs rather than let memory and latency grow unbounded
 _MAX_AUDIO_SECS = 60    # truncate clips longer than this before noise reduction and Whisper
 
