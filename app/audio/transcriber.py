@@ -173,7 +173,12 @@ class TranscriberWorker(QThread):
             # Normalize to a consistent peak level so Whisper's VAD always
             # sees adequate signal regardless of input gain or system type.
             normalized = raw / peak if peak > 0.0 else raw
-            audio = _reduce_noise(normalized)
+            # Pad with 1 s of silence so Whisper flushes the final segment.
+            # Without this, audio that ends abruptly (squelch closing mid-word)
+            # is often dropped from the last incomplete segment.
+            padded = np.concatenate([normalized,
+                                     np.zeros(SAMPLE_RATE, dtype=np.float32)])
+            audio = _reduce_noise(padded)
             result = self._model.transcribe(
                 audio,
                 fp16=False,
@@ -185,11 +190,11 @@ class TranscriberWorker(QThread):
                 log.debug(
                     "  row %d seg [%.1f-%.1fs] no_speech_prob=%.3f %r",
                     job.row_index, seg["start"], seg["end"],
-                    seg.get("no_speech_prob", 0), seg["text"][:60],
+                    seg.get("no_speech_prob", 0), seg["text"][:80],
                 )
             text = result.get("text", "").strip()
             if text:
-                log.info("Transcription row %d: %r", job.row_index, text[:80])
+                log.info("Transcription row %d: %r", job.row_index, text[:200])
             else:
                 log.warning(
                     "Transcription row %d: Whisper returned empty text for %.1fs of "
