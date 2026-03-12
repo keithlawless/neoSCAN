@@ -161,13 +161,14 @@ class TranscriberWorker(QThread):
             raw = raw[:max_samples]
         duration = len(raw) / SAMPLE_RATE
         try:
-            log.info("Transcribing row %d (%.1fs of audio)…",
-                     job.row_index, duration)
+            log.info("Transcribing row %d (%.1fs of audio, language=%s)…",
+                     job.row_index, duration, self._language or "auto")
             audio = _reduce_noise(raw)
             result = self._model.transcribe(
                 audio,
                 fp16=False,
                 language=self._language,
+                condition_on_previous_text=False,
             )
             text = result.get("text", "").strip()
             if text:
