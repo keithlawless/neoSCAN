@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
 from app.data.models import (
     ScannerConfig, System, Group, Channel, TalkGroup, TrunkFrequency,
     SYSTEM_TYPE_NAMES, SYS_TYPE_CONVENTIONAL, SYS_TYPE_MOTOROLA,
+    SYS_TYPE_P25, SYS_TYPE_P25_EDACS,
 )
 from app.data.band_plan import is_frequency_valid
 import uuid
@@ -969,7 +970,7 @@ class ChannelEditorPanel(QWidget):
         form.addRow("System Name:", e_name)
         form.addRow("", _help_label("sys_name"))
 
-        IMPLEMENTED_SYSTEM_TYPES = {SYS_TYPE_CONVENTIONAL, SYS_TYPE_MOTOROLA}
+        IMPLEMENTED_SYSTEM_TYPES = {SYS_TYPE_CONVENTIONAL, SYS_TYPE_MOTOROLA, SYS_TYPE_P25, SYS_TYPE_P25_EDACS}
         c_type = QComboBox()
         for i, (type_id, type_name) in enumerate(SYSTEM_TYPE_NAMES.items()):
             c_type.addItem(type_name, userData=type_id)
