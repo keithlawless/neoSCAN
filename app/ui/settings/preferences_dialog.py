@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app.audio.transcriber import WHISPER_LANGUAGES, _DEFAULT_LANGUAGE
 from app.serial.port_manager import list_ports
 
 
@@ -196,6 +197,15 @@ class PreferencesDialog(QDialog):
         self._tx_model_label = QLabel("Whisper model:")
         tx_form.addRow(self._tx_model_label, self._tx_model_combo)
 
+        # Transcription language
+        self._tx_lang_combo = QComboBox()
+        self._tx_lang_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self._tx_lang_combo.addItem("Auto-detect", None)
+        for name, code in WHISPER_LANGUAGES:
+            self._tx_lang_combo.addItem(name, code)
+        self._tx_lang_label = QLabel("Language:")
+        tx_form.addRow(self._tx_lang_label, self._tx_lang_combo)
+
         # Transcript directory
         tx_dir_row = QHBoxLayout()
         self._tx_dir_edit = QLineEdit()
@@ -302,6 +312,7 @@ class PreferencesDialog(QDialog):
             self._tx_device_label, self._tx_device_combo,
             self._pt_enable_label, self._pt_enable,
             self._tx_model_label, self._tx_model_combo,
+            self._tx_lang_label, self._tx_lang_combo,
             self._tx_dir_label, self._tx_dir_edit,
         ):
             w.setEnabled(enabled)
@@ -367,6 +378,12 @@ class PreferencesDialog(QDialog):
         if idx >= 0:
             self._tx_model_combo.setCurrentIndex(idx)
 
+        saved_lang = self._settings.value("transcription/language", _DEFAULT_LANGUAGE)
+        for i in range(self._tx_lang_combo.count()):
+            if self._tx_lang_combo.itemData(i) == saved_lang:
+                self._tx_lang_combo.setCurrentIndex(i)
+                break
+
         tx_dir = self._settings.value("transcription/transcript_dir", "")
         self._tx_dir_edit.setText(tx_dir)
 
@@ -386,6 +403,8 @@ class PreferencesDialog(QDialog):
                                 self._pt_device_combo.currentData())
         self._settings.setValue("transcription/model_size",
                                 self._tx_model_combo.currentText())
+        self._settings.setValue("transcription/language",
+                                self._tx_lang_combo.currentData())
         self._settings.setValue("transcription/transcript_dir", self._tx_dir_edit.text())
 
         self._settings.sync()

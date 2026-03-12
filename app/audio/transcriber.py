@@ -31,6 +31,45 @@ from app.ui.settings.preferences_dialog import load_prefs
 log = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "base"
+_DEFAULT_LANGUAGE = "en"
+
+# All languages supported by Whisper, as (display_name, language_code) pairs.
+# Sorted alphabetically; used to populate the language selector in Preferences.
+WHISPER_LANGUAGES: list[tuple[str, str]] = sorted([
+    ("Afrikaans", "af"), ("Albanian", "sq"), ("Amharic", "am"),
+    ("Arabic", "ar"), ("Armenian", "hy"), ("Assamese", "as"),
+    ("Azerbaijani", "az"), ("Bashkir", "ba"), ("Basque", "eu"),
+    ("Belarusian", "be"), ("Bengali", "bn"), ("Bosnian", "bs"),
+    ("Breton", "br"), ("Bulgarian", "bg"), ("Burmese", "my"),
+    ("Catalan", "ca"), ("Chinese", "zh"), ("Croatian", "hr"),
+    ("Czech", "cs"), ("Danish", "da"), ("Dutch", "nl"),
+    ("English", "en"), ("Estonian", "et"), ("Faroese", "fo"),
+    ("Finnish", "fi"), ("French", "fr"), ("Galician", "gl"),
+    ("Georgian", "ka"), ("German", "de"), ("Greek", "el"),
+    ("Gujarati", "gu"), ("Haitian Creole", "ht"), ("Hausa", "ha"),
+    ("Hawaiian", "haw"), ("Hebrew", "he"), ("Hindi", "hi"),
+    ("Hungarian", "hu"), ("Icelandic", "is"), ("Indonesian", "id"),
+    ("Italian", "it"), ("Japanese", "ja"), ("Javanese", "jw"),
+    ("Kannada", "kn"), ("Kazakh", "kk"), ("Khmer", "km"),
+    ("Korean", "ko"), ("Lao", "lo"), ("Latin", "la"),
+    ("Latvian", "lv"), ("Lingala", "ln"), ("Lithuanian", "lt"),
+    ("Luxembourgish", "lb"), ("Macedonian", "mk"), ("Malagasy", "mg"),
+    ("Malay", "ms"), ("Malayalam", "ml"), ("Maltese", "mt"),
+    ("Maori", "mi"), ("Marathi", "mr"), ("Mongolian", "mn"),
+    ("Nepali", "ne"), ("Norwegian", "no"), ("Nynorsk", "nn"),
+    ("Occitan", "oc"), ("Pashto", "ps"), ("Persian", "fa"),
+    ("Polish", "pl"), ("Portuguese", "pt"), ("Punjabi", "pa"),
+    ("Romanian", "ro"), ("Russian", "ru"), ("Sanskrit", "sa"),
+    ("Serbian", "sr"), ("Shona", "sn"), ("Sindhi", "sd"),
+    ("Sinhala", "si"), ("Slovak", "sk"), ("Slovenian", "sl"),
+    ("Somali", "so"), ("Spanish", "es"), ("Sundanese", "su"),
+    ("Swahili", "sw"), ("Swedish", "sv"), ("Tagalog", "tl"),
+    ("Tajik", "tg"), ("Tamil", "ta"), ("Tatar", "tt"),
+    ("Telugu", "te"), ("Thai", "th"), ("Tibetan", "bo"),
+    ("Turkish", "tr"), ("Turkmen", "tk"), ("Ukrainian", "uk"),
+    ("Urdu", "ur"), ("Uzbek", "uz"), ("Vietnamese", "vi"),
+    ("Welsh", "cy"), ("Yiddish", "yi"), ("Yoruba", "yo"),
+], key=lambda x: x[0])
 _MAX_QUEUE_DEPTH = 5    # drop new jobs rather than let memory and latency grow unbounded
 _MAX_AUDIO_SECS = 60    # truncate clips longer than this before noise reduction and Whisper
 
@@ -105,13 +144,18 @@ class TranscriberWorker(QThread):
 
     transcription_ready = pyqtSignal(int, str, object)
 
-    def __init__(self, model, parent=None) -> None:
+    def __init__(self, model, language: Optional[str] = _DEFAULT_LANGUAGE, parent=None) -> None:
         super().__init__(parent)
         self._model = model
+        self._language: Optional[str] = language
         self._queue: list[_TranscriptionJob] = []
         self._mutex = QMutex()
         self._cond = QWaitCondition()
         self._running = True
+
+    def set_language(self, language: Optional[str]) -> None:
+        """Update the transcription language. Takes effect on the next job."""
+        self._language = language
 
     def enqueue(self, job: _TranscriptionJob) -> None:
         with QMutexLocker(self._mutex):
@@ -160,7 +204,7 @@ class TranscriberWorker(QThread):
             result = self._model.transcribe(
                 audio,
                 fp16=False,
-                language="en",
+                language=self._language,
             )
             text = result.get("text", "").strip()
             if text:
@@ -198,6 +242,7 @@ class TranscriptionManager(QObject):
         self._model = None
         self._enabled = False
         self._current_model_size = ""
+        self._current_language: Optional[str] = _DEFAULT_LANGUAGE
 
     # ------------------------------------------------------------------
     # Public API
@@ -227,6 +272,12 @@ class TranscriptionManager(QObject):
 
         transcript_dir = settings.value("transcription/transcript_dir", "")
         self._writer.set_directory(transcript_dir)
+
+        language = settings.value("transcription/language", _DEFAULT_LANGUAGE) or None
+        if language != self._current_language:
+            self._current_language = language
+            if self._worker is not None:
+                self._worker.set_language(language)
 
         model_size = settings.value("transcription/model_size", _DEFAULT_MODEL)
         if self._enabled and model_size != self._current_model_size:
@@ -319,7 +370,7 @@ class TranscriptionManager(QObject):
     def _on_model_loaded(self, model) -> None:
         self._model = model
         self._loader = None
-        self._worker = TranscriberWorker(model, parent=self)
+        self._worker = TranscriberWorker(model, language=self._current_language, parent=self)
         # Use an explicit slot (not signal-to-signal) so Qt's auto-connection
         # correctly marshals the call to the main thread via a queued connection.
         self._worker.transcription_ready.connect(self._on_worker_transcription_ready)
