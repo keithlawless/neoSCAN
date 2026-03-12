@@ -71,6 +71,13 @@ class _UploadWorker(QThread):
     def abort(self) -> None:
         self._abort = True
 
+    def _fmt_freq(self, freq_mhz: float) -> str:
+        """Format frequency for CIN/TFQ SET — zero-padded to 8 digits for BCD996P2."""
+        val = int(freq_mhz * 10000)
+        if self._scanner_model.upper() == "BCD996P2":
+            return f"{val:08d}"
+        return str(val)
+
     def run(self) -> None:
         try:
             self._do_upload()
@@ -180,12 +187,12 @@ class _UploadWorker(QThread):
             self.status.emit(f"Uploading system: {sys.name}")
             self.log_line.emit(f"\n[System] {sys.name} ({sys.type_name})")
 
-            # EDACS, P25, and LTR trunked systems are not yet supported.
-            # Motorola (MOT) is handled below.
-            if sys.is_trunked and not sys.is_motorola:
+            # EDACS, LTR, TRBO, and DMR trunked systems are not yet supported.
+            # Motorola (MOT) and P25 (P25S/P25F) are handled below.
+            if sys.is_trunked and not sys.is_motorola and not sys.is_p25:
                 self.log_line.emit(
                     f"  Skipped — {sys.type_name} system upload not yet supported. "
-                    "Only Motorola trunked systems can be uploaded."
+                    "Only Motorola and P25 trunked systems can be uploaded."
                 )
                 continue
 
@@ -232,18 +239,30 @@ class _UploadWorker(QThread):
             except ValueError:
                 dly = "2"
             lout = 1 if sys.lockout else 0
-            # BCT15X SIN 22-field SET format (differs from BCD996XT at positions 18-22).
-            # Positions: 7-11=RSV(5), 12=START_KEY, 13=RECORD, 14-17=RSV(4),
-            #            18=STATE("00"=none), 19=NUMBER_TAG, 20-22=trailing empty.
-            cmd = (
-                f"SIN,{sys_index},{name},{qk},{hld},{lout},{dly},"
-                f",,,,,"    # pos 7-11: RSV (5 empty)
-                f".,"       # pos 12: START_KEY ("." = none)
-                f"{sys.record_mode or '0'},"  # pos 13: RECORD (0=off,1=marked,2=all)
-                f",,,,"     # pos 14-17: RSV (4 empty)
-                f"00,"      # pos 18: STATE ("00" = no state)
-                f"NONE,,,"  # pos 19: NUMBER_TAG; 20-22: trailing empty
-            )
+            if self._scanner_model.upper() == "BCD996P2":
+                # BCD996P2 SIN SET: positions 14-18=RSV(5, no STATE), 19=NUMBER_TAG,
+                #   20=AGC_ANALOG, 21=AGC_DIGITAL, 22=P25WAITING
+                cmd = (
+                    f"SIN,{sys_index},{name},{qk},{hld},{lout},{dly},"
+                    f",,,,,"    # pos 7-11: RSV (5 empty)
+                    f".,"       # pos 12: START_KEY ("." = none)
+                    f"{sys.record_mode or '0'},"  # pos 13: RECORD
+                    f",,,,,"    # pos 14-18: RSV (5 empty — no STATE field)
+                    f"NONE,0,0,0"  # pos 19: NUMBER_TAG; 20=AGC_ANALOG; 21=AGC_DIGITAL; 22=P25WAITING
+                )
+            else:
+                # BCT15X SIN 22-field SET format (differs from BCD996XT at positions 18-22).
+                # Positions: 7-11=RSV(5), 12=START_KEY, 13=RECORD, 14-17=RSV(4),
+                #            18=STATE("00"=none), 19=NUMBER_TAG, 20-22=trailing empty.
+                cmd = (
+                    f"SIN,{sys_index},{name},{qk},{hld},{lout},{dly},"
+                    f",,,,,"    # pos 7-11: RSV (5 empty)
+                    f".,"       # pos 12: START_KEY ("." = none)
+                    f"{sys.record_mode or '0'},"  # pos 13: RECORD (0=off,1=marked,2=all)
+                    f",,,,"     # pos 14-17: RSV (4 empty)
+                    f"00,"      # pos 18: STATE ("00" = no state)
+                    f"NONE,,,"  # pos 19: NUMBER_TAG; 20-22: trailing empty
+                )
             self.log_line.emit(f"  SIN cmd: {cmd!r}")
             try:
                 sin_result = proto.send_command(cmd)
@@ -302,7 +321,7 @@ class _UploadWorker(QThread):
                             done += 1
                             continue
 
-                        freq_int = int(freq_raw * 10000)
+                        freq_fmt = self._fmt_freq(freq_raw)
                         mod = mod_mode_to_string(
                             ch.modulation if ch.modulation else "0"
                         )
@@ -327,7 +346,7 @@ class _UploadWorker(QThread):
                         record = 1 if ch.output == "ON" else 0
                         try:
                             proto.send_command(
-                                f"CIN,{ch_index},{ch_name},{freq_int},{mod},"
+                                f"CIN,{ch_index},{ch_name},{freq_fmt},{mod},"
                                 f"{tone},{1 if ch.tone_lockout else 0},"
                                 f"{1 if ch.lockout else 0},{1 if ch.priority else 0},"
                                 f"{1 if ch.attenuator else 0},{alt},{altl},"
@@ -346,7 +365,11 @@ class _UploadWorker(QThread):
                 # Upload QGL (quick group lockout) for this system
                 try:
                     qgl = sys.qgl or "1111111111"
-                    proto.send_command(f"QGL,{sys_index},{qgl}")
+                    if self._scanner_model.upper() == "BCD996P2":
+                        pages = ",".join([qgl] + ["0000000000"] * 9)
+                        proto.send_command(f"QGL,{sys_index},{pages}")
+                    else:
+                        proto.send_command(f"QGL,{sys_index},{qgl}")
                 except ProtocolError:
                     pass
 
@@ -358,7 +381,27 @@ class _UploadWorker(QThread):
                 # QGL for trunked system
                 try:
                     qgl = sys.qgl or "1111111111"
-                    proto.send_command(f"QGL,{sys_index},{qgl}")
+                    if self._scanner_model.upper() == "BCD996P2":
+                        pages = ",".join([qgl] + ["0000000000"] * 9)
+                        proto.send_command(f"QGL,{sys_index},{pages}")
+                    else:
+                        proto.send_command(f"QGL,{sys_index},{qgl}")
+                except ProtocolError:
+                    pass
+
+            elif sys.is_p25:
+                tgs = self._upload_p25_system(
+                    proto, sys, sys_index, _safe, done, total_steps
+                )
+                ch_count += tgs
+                # QGL for P25 system
+                try:
+                    qgl = sys.qgl or "1111111111"
+                    if self._scanner_model.upper() == "BCD996P2":
+                        pages = ",".join([qgl] + ["0000000000"] * 9)
+                        proto.send_command(f"QGL,{sys_index},{pages}")
+                    else:
+                        proto.send_command(f"QGL,{sys_index},{qgl}")
                 except ProtocolError:
                     pass
 
@@ -488,7 +531,6 @@ class _UploadWorker(QThread):
                     break
                 try:
                     freq_raw = float(tf.frequency)
-                    freq_int = int(freq_raw * 10000)
                 except (ValueError, TypeError):
                     continue
 
@@ -508,7 +550,7 @@ class _UploadWorker(QThread):
                 try:
                     tfq_resp = proto.set_trunk_freq(
                         freq_idx,
-                        str(freq_int),           # FRQ
+                        self._fmt_freq(freq_raw),  # FRQ
                         lcn,                     # LCN
                         "1" if tf.lockout else "0",  # LOUT
                         "0",                     # RECORD
@@ -584,6 +626,178 @@ class _UploadWorker(QThread):
 
         return tg_count
 
+    def _upload_p25_system(
+        self,
+        proto: ScannerProtocol,
+        sys: "System",
+        sys_index: str,
+        _safe: set,
+        done: int,
+        total_steps: int,
+    ) -> int:
+        """
+        Upload TRN parameters, sites/trunk-freqs, and TGID groups/talk-groups
+        for a P25 trunked system. P25S has sites; P25F (one-frequency) does not.
+        Returns the number of talk groups uploaded.
+        """
+        tg_count = 0
+
+        # --- TRN: trunking parameters ---
+        # P25 TRN SET (28 params after index):
+        # ID_SEARCH, S_BIT, END_CODE, AFS, RSV×2, EMG, EMGL, FMAP, CTM_FMAP,
+        # RSV×9, TGID_GRP_HEAD(0), TGID_GRP_TAIL(0), ID_LOUT×2(0),
+        # MOT_ID, EMG_COLOR, EMG_PATTERN, P25NAC, PRI_ID_SCAN
+        emg_level = sys.emg_alert_level or "0"
+        try:
+            proto.set_trunking_params(
+                int(sys_index),
+                sys.id_search or "0",                   # 1. ID_SEARCH
+                "0",                                    # 2. S_BIT (not used for P25)
+                "0",                                    # 3. END_CODE
+                "0",                                    # 4. AFS
+                "0", "0",                               # 5-6. RSV
+                "0",                                    # 7. EMG
+                emg_level,                              # 8. EMGL
+                "0",                                    # 9. FMAP (not used for P25)
+                "00000000",                             # 10. CTM_FMAP
+                "0", "0", "0",                          # 11-13. RSV
+                "0", "0", "0",                          # 14-16. RSV
+                "0", "0", "0",                          # 17-19. RSV
+                "0",                                    # 20. TGID_GRP_HEAD (scanner fills)
+                "0",                                    # 21. TGID_GRP_TAIL
+                "0",                                    # 22. ID_LOUT_GRP_HEAD
+                "0",                                    # 23. ID_LOUT_GRP_TAIL
+                "0",                                    # 24. MOT_ID (0=Decimal)
+                "OFF",                                  # 25. EMG_COLOR
+                "0",                                    # 26. EMG_PATTERN
+                sys.p25_nac or "SRCH",                  # 27. P25NAC
+                "0",                                    # 28. PRI_ID_SCAN
+            )
+        except ProtocolError as e:
+            self.log_line.emit(f"  Warning: TRN error: {e}")
+
+        # --- Trunk frequencies (P25S only; P25F has no sites) ---
+        if not sys.is_p25f and sys.trunk_frequencies:
+            try:
+                site_index = proto.append_site(int(sys_index), "P25S")
+                self.log_line.emit(f"  Created P25 site (AST P25S) → index {site_index}")
+            except ProtocolError as e:
+                self.log_line.emit(f"  Warning: AST error: {e}")
+                site_index = -1
+
+            if site_index != -1:
+                site_name = "".join(c for c in (sys.name or "").strip() if c in _safe)[:16].strip()
+                _model = self._scanner_model.upper()
+                # C-CH must be 1 for P25 sites (control channel only)
+                if _model == "BCD996P2":
+                    sif_extra = ("", "STD", "", "200", "")  # rsv, mot_type, edacs_type, p25waiting, rsv
+                else:
+                    sif_extra = ("00", "STD", "")           # state, mot_type, trailing
+                try:
+                    proto.set_site_info(
+                        site_index,
+                        site_name, ".", "0", "0",           # name, qk, hld, lout
+                        "AUTO", "0", "1", "", "",            # mod, att, C-CH=1, rsv, rsv
+                        ".",                                 # start_key
+                        "00000000N", "00000000E", "", "0",   # lat, lon, range, gps
+                        *sif_extra,
+                    )
+                except ProtocolError as e:
+                    self.log_line.emit(f"  Warning: SIF error: {e}")
+
+                self.log_line.emit(f"  Uploading {len(sys.trunk_frequencies)} trunk frequency(ies)")
+                auto_lcn = 0
+                for tf in sys.trunk_frequencies:
+                    if self._abort:
+                        break
+                    try:
+                        freq_raw = float(tf.frequency)
+                    except (ValueError, TypeError):
+                        continue
+
+                    try:
+                        freq_idx = proto.add_trunk_freq(site_index)
+                    except ProtocolError as e:
+                        self.log_line.emit(f"    ERROR allocating trunk freq: {e}")
+                        continue
+
+                    auto_lcn += 1
+                    stored_lcn = int(tf.lcn) if tf.lcn and tf.lcn.strip().isdigit() else 0
+                    lcn = str(stored_lcn) if stored_lcn > 0 else str(auto_lcn)
+                    try:
+                        proto.set_trunk_freq(
+                            freq_idx,
+                            self._fmt_freq(freq_raw),        # FRQ
+                            lcn,                             # LCN
+                            "1" if tf.lockout else "0",      # LOUT
+                            "0",                             # RECORD
+                            "NONE",                          # NUMBER_TAG
+                            "0",                             # VOL_OFFSET
+                            "",                              # RSV
+                        )
+                        self.log_line.emit(f"    TF {freq_raw:.4f} MHz  LCN {lcn}")
+                    except ProtocolError as e:
+                        self.log_line.emit(f"    Warning: TFQ error: {e}")
+
+        # --- TGID groups → talk groups ---
+        tgid_groups = [g for g in sys.groups if not g.is_site]
+        for grp in tgid_groups:
+            if self._abort:
+                break
+            grp_name = "".join(c for c in (grp.name or "").strip() if c in _safe)[:16].strip()
+            self.log_line.emit(f"  [TGID Group] {grp_name}")
+
+            try:
+                grp_idx = proto.append_tgid_group(int(sys_index))
+            except ProtocolError as e:
+                self.log_line.emit(f"    ERROR creating TGID group: {e}")
+                continue
+
+            grp_lout = "1" if grp.lockout else "0"
+            try:
+                proto.set_group_info(
+                    grp_idx,
+                    f"{grp_name},{grp.quick_key or '.'},{ grp_lout},,,,",
+                )
+            except ProtocolError as e:
+                self.log_line.emit(f"    Warning: GIN error: {e}")
+
+            for tg in grp.channels:
+                if self._abort:
+                    break
+                if not isinstance(tg, TalkGroup):
+                    continue
+
+                try:
+                    tgid_idx = proto.append_tgid(grp_idx)
+                except ProtocolError as e:
+                    self.log_line.emit(f"    ERROR allocating TGID: {e}")
+                    continue
+
+                tg_name = "".join(c for c in (tg.name or "").strip() if c in _safe)[:16].strip()
+                try:
+                    proto.set_tgid(
+                        tgid_idx,
+                        tg_name,
+                        tg.tgid or "0",
+                        "1" if tg.lockout else "0",
+                        "1" if tg.priority else "0",
+                        tg.alert_tone or "0",
+                        tg.alert_level or "0",
+                        "0",                             # RECORD
+                        "0",                             # AUDIO_TYPE
+                        "NONE",                          # NUMBER_TAG
+                        "OFF",                           # ALT_COLOR
+                        "0",                             # ALT_PATTERN
+                        "0",                             # VOL_OFFSET
+                    )
+                    self.log_line.emit(f"    TGID {tg.tgid}  {tg_name}")
+                    tg_count += 1
+                except ProtocolError as e:
+                    self.log_line.emit(f"    Warning: TIN error: {e}")
+
+        return tg_count
+
 
 class UploadDialog(QDialog):
     """Dialog for uploading the channel list to the scanner."""
@@ -619,11 +833,11 @@ class UploadDialog(QDialog):
             ) if sys.is_trunked else 0
             ch_count_label = (
                 f"{tg_count} talk groups, {len(sys.trunk_frequencies)} trunk freqs"
-                if sys.is_motorola else
+                if (sys.is_motorola or sys.is_p25) else
                 f"{sum(len(g.channels) for g in sys.groups)} channels"
             )
             label = f"[{sys.type_name}] {sys.name or f'System {i+1}'}  ({ch_count_label})"
-            if sys.is_trunked and not sys.is_motorola:
+            if sys.is_trunked and not sys.is_motorola and not sys.is_p25:
                 label += "  ⚠ not yet supported — will be skipped"
                 has_unsupported_trunked = True
             item = QListWidgetItem(label)
@@ -637,8 +851,8 @@ class UploadDialog(QDialog):
         if has_unsupported_trunked:
             from PyQt6.QtWidgets import QLabel as _QLabel
             warn = _QLabel(
-                "⚠  EDACS, P25, and LTR systems will be skipped — only Motorola "
-                "trunked systems are currently supported for upload."
+                "⚠  EDACS, LTR, TRBO, and DMR systems will be skipped — only Motorola "
+                "and P25 trunked systems are currently supported for upload."
             )
             warn.setWordWrap(True)
             warn.setStyleSheet("color: #b05000; font-size: 11px;")

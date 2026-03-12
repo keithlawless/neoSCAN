@@ -47,6 +47,8 @@ SYSTEM_TYPE_MAP: dict[str, int] = {
     "MV2":  3,   "MU2": 3,   "MP25": 3,   # Motorola
     "M82C": 3,
     "EDN":  4,   "EDW": 4,               # EDACS narrow/wide
+    "TRBO": 8,   # MotoTRBO
+    "DMR":  9,   # DMR One Frequency Trunk
 }
 
 INT_TO_SIN_TYPE: dict[int, str] = {
@@ -54,8 +56,11 @@ INT_TO_SIN_TYPE: dict[int, str] = {
     2: "M81S",
     3: "M82S",
     4: "EDN",
-    5: "EDS",
+    5: "P25S",
     6: "LTR",
+    7: "P25F",
+    8: "TRBO",
+    9: "DMR",
 }
 
 # CSY command accepts a simpler set of type codes than SIN.
@@ -70,6 +75,8 @@ INT_TO_CSY_TYPE: dict[int, str] = {
     5: "P25S",  # P25 standard
     6: "EDS",   # EDACS SCAT / ProVoice
     7: "P25F",  # P25 one-frequency trunk
+    8: "TRBO",  # MotoTRBO
+    9: "DMR",   # DMR One Frequency Trunk
 }
 
 

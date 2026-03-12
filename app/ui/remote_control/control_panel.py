@@ -332,7 +332,9 @@ class ControlPanel(QWidget):
 
         if freq:
             try:
-                if "." in freq:
+                if len(freq) == 8 and freq.isdigit():
+                    freq_str = f"{int(freq) / 10000.0:.4f} MHz"
+                elif "." in freq:
                     freq_str = f"{float(freq):.4f} MHz"
                 else:
                     freq_str = f"TGID {int(float(freq))}"

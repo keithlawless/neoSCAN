@@ -503,7 +503,7 @@ class MainWindow(QMainWindow):
             return
         from app.ui.programmer.download_dialog import DownloadDialog
         self._log_panel.pause_polling()
-        dlg = DownloadDialog(self._proto, parent=self)
+        dlg = DownloadDialog(self._proto, scanner_model=self._scanner_model or "", parent=self)
         try:
             result = dlg.exec()
         finally:

@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
 
 from app.data.models import (
     ScannerConfig, System, Group, Channel, TalkGroup, TrunkFrequency,
-    SYS_TYPE_CONVENTIONAL,
+    SYS_TYPE_CONVENTIONAL, SYS_TYPE_P25_EDACS,
 )
 from app.serial.protocol import ScannerProtocol, ProtocolError
 from app.serial.scanner_model import sin_type_to_internal, mod_mode_to_string
@@ -46,9 +46,10 @@ class _DownloadWorker(QThread):
     finished_ok = pyqtSignal(object)   # ScannerConfig
     finished_err = pyqtSignal(str)
 
-    def __init__(self, proto: ScannerProtocol, parent=None) -> None:
+    def __init__(self, proto: ScannerProtocol, scanner_model: str = "", parent=None) -> None:
         super().__init__(parent)
         self._proto = proto
+        self._scanner_model = scanner_model
         self._abort = False
 
     def abort(self) -> None:
@@ -239,6 +240,11 @@ class _DownloadWorker(QThread):
                     proto, sys_obj, sys_index, first_grp_index_field, config
                 )
 
+            elif sys_obj.is_p25:
+                ch_count += self._download_p25_system(
+                    proto, sys_obj, sys_index, first_grp_index_field, config
+                )
+
             config.systems.append(sys_obj)
             sys_count += 1
             self.progress.emit(min(90, sys_count * 10))
@@ -393,8 +399,10 @@ class _DownloadWorker(QThread):
             site_idx = next_site_idx
 
         # --- TGID groups → talk groups ---
+        # TRN TGID_GRP_HEAD: field[17] on BCD996P2, field[20] on BCT15X/BCD996XT
+        tgid_head_field = 17 if self._scanner_model.upper() == "BCD996P2" else 20
         try:
-            tgid_grp_idx = int(_f(trn, 20))
+            tgid_grp_idx = int(_f(trn, tgid_head_field))
         except ValueError:
             tgid_grp_idx = -1
 
@@ -469,15 +477,196 @@ class _DownloadWorker(QThread):
 
         return tg_count
 
+    def _download_p25_system(
+        self,
+        proto: ScannerProtocol,
+        sys_obj: System,
+        sys_index: int,
+        first_site_field: str,
+        config: "ScannerConfig",
+    ) -> int:
+        """
+        Download sites/trunk-freqs and TGID groups/talk-groups for a P25 system.
+        P25S has sites like Motorola. P25F (one-frequency) has no sites.
+        Returns number of talk groups downloaded.
+        """
+        tg_count = 0
+
+        try:
+            trn = proto.get_trunking_params(sys_index)
+        except ProtocolError as e:
+            self.log_line.emit(f"  TRN error: {e}")
+            return 0
+
+        self.log_line.emit(f"  TRN raw ({len(trn)} fields): {','.join(trn[:20])}")
+
+        def _f(fields: list[str], i: int) -> str:
+            return fields[i].strip() if i < len(fields) else ""
+
+        # P25 TRN GET response (0-based, INDEX excluded):
+        # [0]=ID_SEARCH [1]=S_BIT [2]=END_CODE [3]=AFS [4-5]=RSV
+        # [6]=EMG [7]=EMGL [8]=FMAP [9]=CTM_FMAP [10-18]=RSV (9 fields)
+        # [19]=TGID_GRP_HEAD (P25 has no DIG_END_CODE at [19] unlike BCT15X Motorola)
+        # [20]=TGID_GRP_TAIL [21-22]=ID_LOUT heads [23]=MOT_ID
+        # [24]=EMG_COLOR [25]=EMG_PATTERN [26]=RSV [27]=P25NAC [28]=PRI_ID_SCAN
+        sys_obj.id_search = _f(trn, 0)
+        sys_obj.p25_nac = _f(trn, 27) or "SRCH"
+
+        # --- Sites → trunk frequencies (P25S only; P25F has no sites) ---
+        is_p25f = sys_obj.is_p25f
+        if not is_p25f:
+            try:
+                site_idx = int(first_site_field)
+            except (ValueError, TypeError):
+                site_idx = -1
+
+            while site_idx not in (-1, 0) and not self._abort:
+                try:
+                    sif = proto.get_site_info(site_idx)
+                except ProtocolError as e:
+                    self.log_line.emit(f"  SIF error at {site_idx}: {e}")
+                    break
+
+                site_name = _f(sif, 1)
+                site_qk = _f(sif, 2)
+                site_lockout = _f(sif, 4)
+                try:
+                    next_site_idx = int(_f(sif, 11))
+                except ValueError:
+                    next_site_idx = -1
+                try:
+                    tfq_idx = int(_f(sif, 13))
+                except ValueError:
+                    tfq_idx = -1
+
+                self.log_line.emit(f"  [Site] {site_name}")
+
+                site_grp = Group()
+                site_grp.name = site_name
+                site_grp.quick_key = site_qk or "."
+                site_grp.lockout = site_lockout == "1"
+                site_grp.group_type = "3"
+                site_grp.group_id = uuid.uuid4().hex[:16].upper()
+
+                while tfq_idx not in (-1, 0) and not self._abort:
+                    try:
+                        tfq = proto.get_trunk_freq(tfq_idx)
+                    except ProtocolError as e:
+                        self.log_line.emit(f"    TFQ error at {tfq_idx}: {e}")
+                        break
+
+                    freq_raw = _f(tfq, 0)
+                    lcn = _f(tfq, 1)
+                    tf_lockout = _f(tfq, 2)
+                    try:
+                        next_tfq_idx = int(_f(tfq, 4))
+                    except ValueError:
+                        next_tfq_idx = -1
+
+                    try:
+                        freq_mhz = float(freq_raw) / 10000.0
+                        freq_str = f"{freq_mhz:.4f}"
+                    except ValueError:
+                        freq_str = freq_raw
+
+                    tf = TrunkFrequency()
+                    tf.frequency = freq_str
+                    tf.lcn = lcn
+                    tf.lockout = tf_lockout == "1"
+                    tf.group_id = sys_obj.group_id
+                    sys_obj.trunk_frequencies.append(tf)
+                    config.trunk_frequencies.append(tf)
+
+                    self.log_line.emit(f"    TF {freq_str} MHz  LCN {lcn}")
+                    tfq_idx = next_tfq_idx
+
+                sys_obj.groups.append(site_grp)
+                site_idx = next_site_idx
+
+        # --- TGID groups → talk groups ---
+        # P25 TGID_GRP_HEAD: field[19] (one earlier than BCT15X Motorola's [20])
+        try:
+            tgid_grp_idx = int(_f(trn, 19))
+        except ValueError:
+            tgid_grp_idx = -1
+
+        while tgid_grp_idx not in (-1, 0) and not self._abort:
+            try:
+                gin = proto.get_group_info(tgid_grp_idx)
+            except ProtocolError as e:
+                self.log_line.emit(f"  GIN error at {tgid_grp_idx}: {e}")
+                break
+
+            grp_name = _f(gin, 1)
+            grp_qk = _f(gin, 2)
+            grp_lockout = _f(gin, 3)
+            try:
+                next_grp_idx = int(_f(gin, 5))
+            except ValueError:
+                next_grp_idx = -1
+            try:
+                tgid_idx = int(_f(gin, 7))
+            except ValueError:
+                tgid_idx = -1
+
+            self.log_line.emit(f"  [TGID Group] {grp_name}")
+
+            tg_grp = Group()
+            tg_grp.name = grp_name
+            tg_grp.quick_key = grp_qk or "."
+            tg_grp.lockout = grp_lockout == "1"
+            tg_grp.group_type = "2"
+            tg_grp.group_id = uuid.uuid4().hex[:16].upper()
+
+            while tgid_idx not in (-1, 0) and not self._abort:
+                try:
+                    tin = proto.get_tgid(tgid_idx)
+                except ProtocolError as e:
+                    self.log_line.emit(f"    TIN error at {tgid_idx}: {e}")
+                    break
+
+                tg_name = _f(tin, 0)
+                tgid = _f(tin, 1)
+                tg_lockout = _f(tin, 2)
+                tg_priority = _f(tin, 3)
+                tg_alert = _f(tin, 4)
+                tg_alert_lvl = _f(tin, 5)
+                tg_audio = _f(tin, 11)
+                try:
+                    next_tgid_idx = int(_f(tin, 7))
+                except ValueError:
+                    next_tgid_idx = -1
+
+                tg = TalkGroup()
+                tg.name = tg_name
+                tg.tgid = tgid
+                tg.lockout = tg_lockout == "1"
+                tg.priority = tg_priority == "1"
+                tg.alert_tone = tg_alert
+                tg.alert_level = tg_alert_lvl
+                tg.audio_type = tg_audio
+                tg.group_id = tg_grp.group_id
+                tg_grp.channels.append(tg)
+
+                self.log_line.emit(f"    TGID {tgid}  {tg_name}")
+                tg_count += 1
+                tgid_idx = next_tgid_idx
+
+            sys_obj.groups.append(tg_grp)
+            tgid_grp_idx = next_grp_idx
+
+        return tg_count
+
 
 class DownloadDialog(QDialog):
     """Dialog for downloading channel data from the scanner."""
 
     downloaded_config: ScannerConfig | None = None
 
-    def __init__(self, proto: ScannerProtocol, parent=None) -> None:
+    def __init__(self, proto: ScannerProtocol, scanner_model: str = "", parent=None) -> None:
         super().__init__(parent)
         self._proto = proto
+        self._scanner_model = scanner_model
         self._worker: _DownloadWorker | None = None
         self.downloaded_config = None
 
@@ -532,7 +721,7 @@ class DownloadDialog(QDialog):
         self._close_btn.setEnabled(False)
         self._log.clear()
 
-        worker = _DownloadWorker(self._proto, parent=self)
+        worker = _DownloadWorker(self._proto, scanner_model=self._scanner_model, parent=self)
         worker.progress.connect(self._progress.setValue)
         worker.log_line.connect(self._log.append)
         worker.status.connect(self._status_label.setText)

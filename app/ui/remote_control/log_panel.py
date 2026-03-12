@@ -65,8 +65,13 @@ class _TransmissionEntry:
     def freq_display(self) -> str:
         if not self.frequency:
             return ""
-        # GLG field[0] is "FRQ/TGID": conventional frequencies have a decimal
-        # point ("154.2350"), trunked TGIDs are plain integers ("33840").
+        # BCD996P2 conventional frequencies are exactly 8 zero-padded digits (Hz/100)
+        if len(self.frequency) == 8 and self.frequency.isdigit():
+            try:
+                return f"{int(self.frequency) / 10000.0:.4f} MHz"
+            except ValueError:
+                return self.frequency
+        # BCT15X: decimal point = conventional frequency, no dot = TGID
         if "." not in self.frequency:
             try:
                 return f"TGID {int(float(self.frequency))}"
