@@ -99,8 +99,12 @@ class ConnectionSettingsDialog(QDialog):
         self._audio_device_label = QLabel("Input device:")
         self._audio_combo = QComboBox()
         self._audio_combo.setMinimumWidth(250)
+        audio_refresh_btn = QPushButton("Refresh")
+        audio_refresh_btn.setFixedWidth(70)
+        audio_refresh_btn.clicked.connect(self._refresh_audio_devices)
         audio_device_row = QHBoxLayout()
         audio_device_row.addWidget(self._audio_combo, stretch=1)
+        audio_device_row.addWidget(audio_refresh_btn)
         audio_form.addRow(self._audio_device_label, audio_device_row)
 
         if _SD_AVAILABLE:
@@ -148,6 +152,20 @@ class ConnectionSettingsDialog(QDialog):
                     self._audio_combo.addItem(label, userData=i)
         except Exception:
             pass
+
+    def _refresh_audio_devices(self) -> None:
+        """Force PortAudio to re-scan devices, then repopulate the combo."""
+        if not _SD_AVAILABLE:
+            return
+        try:
+            # sounddevice wraps PortAudio; terminate+reinitialize forces a device rescan
+            sd._terminate()
+            sd._initialize()
+        except Exception:
+            pass
+        self._populate_audio_devices()
+        # Re-apply saved selection for the current port after refresh
+        self._on_port_changed()
 
     def _on_transcribe_changed(self, state: int) -> None:
         enabled = bool(state)
