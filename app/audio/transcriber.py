@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "base"
 _DEFAULT_LANGUAGE = DEFAULT_LANGUAGE
-_MAX_QUEUE_DEPTH = 5    # drop new jobs rather than let memory and latency grow unbounded
+_MAX_QUEUE_DEPTH = 10   # drop new jobs rather than let memory and latency grow unbounded
 _MAX_AUDIO_SECS = 60    # truncate clips longer than this before noise reduction and Whisper
 
 
@@ -128,6 +128,7 @@ class TranscriberWorker(QThread):
                     "dropping transcription for row %d",
                     _MAX_QUEUE_DEPTH, job.row_index,
                 )
+                self.transcription_ready.emit(job.row_index, "[dropped — queue full]", None)
                 return
             self._queue.append(job)
             log.debug("TranscriberWorker: enqueued row %d (%d jobs pending)",
