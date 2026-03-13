@@ -356,8 +356,16 @@ class MainWindow(QMainWindow):
             self._channel_editor.set_config(self._config)
             self._channel_editor.clear()
             self._channel_editor.set_scanner_model(radio.scanner_model)
-            self._update_title()
-            self._update_file_status()
+        else:
+            # Radio has no downloaded config yet — show empty editor.
+            self._config = None
+            self._systems_panel.load_config(None)
+            self._channel_editor.set_config(None)
+            self._channel_editor.clear()
+            if radio:
+                self._channel_editor.set_scanner_model(radio.scanner_model)
+        self._update_title()
+        self._update_file_status()
 
     def _on_system_selected(self, s_idx: int) -> None:
         if self._config:
