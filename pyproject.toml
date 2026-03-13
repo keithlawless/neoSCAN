@@ -4,8 +4,8 @@ build-backend = "setuptools.backends.legacy:build"
 
 [project]
 name = "neo-scan"
-version = "0.1.0"
-description = "Cross-platform desktop app for programming Uniden BCT15-X radio scanners"
+version = "1.0.0"
+description = "Cross-platform desktop app for programming Uniden radio scanners"
 requires-python = ">=3.11"
 dependencies = [
     "PyQt6>=6.6.0",

@@ -1,0 +1,122 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  # ── Build on each platform ──────────────────────────────────────────────────
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: macos
+          - os: windows-latest
+            platform: windows
+          - os: ubuntu-latest
+            platform: linux
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ── System dependencies ──────────────────────────────────────────────
+
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libportaudio2 \
+            libxcb-xinerama0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-shape0 libxcb-xfixes0 libxkbcommon-x11-0
+
+      # ── Python dependencies ──────────────────────────────────────────────
+      # openai-whisper / torch are intentionally excluded — they pull in
+      # ~2 GB of PyTorch which makes bundled executables impractical.
+      # The app detects their absence at runtime and disables transcription
+      # gracefully. Users who want transcription can run from source.
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install PyQt6 pyserial sounddevice numpy scipy noisereduce
+          pip install pyinstaller
+
+      - name: Install macOS extras
+        if: matrix.platform == 'macos'
+        run: pip install pyobjc
+
+      # ── Build ────────────────────────────────────────────────────────────
+
+      - name: Build with PyInstaller
+        run: pyinstaller neoscan.spec
+
+      # ── Package ──────────────────────────────────────────────────────────
+
+      - name: Create DMG (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          hdiutil create \
+            -volname "NeoSCAN ${{ github.ref_name }}" \
+            -srcfolder dist/NeoSCAN.app \
+            -ov -format UDZO \
+            "dist/NeoSCAN-${{ github.ref_name }}-macos.dmg"
+
+      - name: Zip executable (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path dist\NeoSCAN.exe `
+            -DestinationPath "dist\NeoSCAN-${{ github.ref_name }}-windows.zip"
+
+      - name: Create tarball (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          tar -C dist -czf \
+            "dist/NeoSCAN-${{ github.ref_name }}-linux.tar.gz" \
+            NeoSCAN/
+
+      # ── Upload artifact for the release job ─────────────────────────────
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NeoSCAN-${{ matrix.platform }}
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/*.tar.gz
+
+  # ── Create GitHub Release with all three artifacts ──────────────────────────
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: NeoSCAN ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: dist/*
