@@ -283,6 +283,10 @@ class TranscriptionManager(QObject):
         """Inject a shared TranscriptWriter so multiple radios write to one file."""
         self._writer = writer
 
+    @property
+    def is_enabled(self) -> bool:
+        return self._enabled
+
     def recapture_noise_profile(self) -> None:
         """Discard the pass-through noise profile and capture a fresh one."""
         self._recorder.recapture_noise_profile()

@@ -274,10 +274,14 @@ class LogPanel(QWidget):
                         entry = self._active_entries[label]
                         row_index = self._active_entry_rows.pop(label)
                         entry.end_time = datetime.now()
-                        if radio.transcription_manager:
+                        tx_active = (
+                            radio.transcription_manager is not None
+                            and radio.transcription_manager.is_enabled
+                        )
+                        if tx_active:
                             entry.transcript_pending = True
                         self._refresh_row(row_index)
-                        if radio.transcription_manager:
+                        if tx_active:
                             radio.transcription_manager.on_transmission_ended(row_index, entry)
                         self._active_entries[label] = None
             except Exception:
