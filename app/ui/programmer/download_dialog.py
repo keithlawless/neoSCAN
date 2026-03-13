@@ -301,7 +301,6 @@ class _DownloadWorker(QThread):
 
         self.log_line.emit(f"  TRN raw ({len(trn)} fields): {','.join(trn[:25])}")
         self.log_line.emit(f"  SIN field[13] (first site/group head): {first_site_field}")
-        self.log_line.emit(f"  TRN[20] (TGID_GRP_HEAD candidate): {trn[20] if len(trn) > 20 else '<missing>'}")
 
         # TRN GET response field indices (0-based, after command prefix stripped):
         # [0]=ID_SEARCH [1]=S_BIT [2]=END_CODE [3]=AFS [4-5]=RSV [6]=EMG [7]=EMGL
@@ -399,10 +398,10 @@ class _DownloadWorker(QThread):
             site_idx = next_site_idx
 
         # --- TGID groups → talk groups ---
-        # TRN TGID_GRP_HEAD: field[17] on BCD996P2, field[20] on BCT15X/BCD996XT
-        tgid_head_field = 17 if self._scanner_model.upper() == "BCD996P2" else 20
+        # TRN TGID_GRP_HEAD is at field[20] for all models (BCT15X, BCD996XT, BCD996P2).
+        # Confirmed by BCD996P2 live scanner output: TRN[20]=1222 on Motorola system.
         try:
-            tgid_grp_idx = int(_f(trn, tgid_head_field))
+            tgid_grp_idx = int(_f(trn, 20))
         except ValueError:
             tgid_grp_idx = -1
 
@@ -498,7 +497,7 @@ class _DownloadWorker(QThread):
             self.log_line.emit(f"  TRN error: {e}")
             return 0
 
-        self.log_line.emit(f"  TRN raw ({len(trn)} fields): {','.join(trn[:20])}")
+        self.log_line.emit(f"  TRN raw ({len(trn)} fields): {','.join(trn[:25])}")
 
         def _f(fields: list[str], i: int) -> str:
             return fields[i].strip() if i < len(fields) else ""
@@ -506,9 +505,9 @@ class _DownloadWorker(QThread):
         # P25 TRN GET response (0-based, INDEX excluded):
         # [0]=ID_SEARCH [1]=S_BIT [2]=END_CODE [3]=AFS [4-5]=RSV
         # [6]=EMG [7]=EMGL [8]=FMAP [9]=CTM_FMAP [10-18]=RSV (9 fields)
-        # [19]=TGID_GRP_HEAD (P25 has no DIG_END_CODE at [19] unlike BCT15X Motorola)
-        # [20]=TGID_GRP_TAIL [21-22]=ID_LOUT heads [23]=MOT_ID
-        # [24]=EMG_COLOR [25]=EMG_PATTERN [26]=RSV [27]=P25NAC [28]=PRI_ID_SCAN
+        # [19]=RSV [20]=TGID_GRP_HEAD [21]=TGID_GRP_TAIL [22-23]=ID_LOUT heads
+        # [24]=MOT_ID [25]=EMG_COLOR [26]=EMG_PATTERN [27]=P25NAC [28]=PRI_ID_SCAN
+        # Confirmed: BCD996P2 P25 and Motorola both use field[20] for TGID_GRP_HEAD.
         sys_obj.id_search = _f(trn, 0)
         sys_obj.p25_nac = _f(trn, 27) or "SRCH"
 
@@ -584,9 +583,9 @@ class _DownloadWorker(QThread):
                 site_idx = next_site_idx
 
         # --- TGID groups → talk groups ---
-        # P25 TGID_GRP_HEAD: field[19] (one earlier than BCT15X Motorola's [20])
+        # P25 TGID_GRP_HEAD: field[20] — confirmed same index as Motorola on all models.
         try:
-            tgid_grp_idx = int(_f(trn, 19))
+            tgid_grp_idx = int(_f(trn, 20))
         except ValueError:
             tgid_grp_idx = -1
 
@@ -757,7 +756,10 @@ class DownloadDialog(QDialog):
         self._close_btn.setEnabled(True)
 
     def closeEvent(self, event) -> None:
-        if self._worker and self._worker.isRunning():
-            self._worker.abort()
-            self._worker.wait(3000)
+        try:
+            if self._worker and self._worker.isRunning():
+                self._worker.abort()
+                self._worker.wait(3000)
+        except RuntimeError:
+            pass  # C++ object already deleted after download completed
         super().closeEvent(event)

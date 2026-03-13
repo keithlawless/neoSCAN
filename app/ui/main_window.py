@@ -10,7 +10,9 @@ import serial
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtWidgets import (
+    QComboBox,
     QFileDialog,
+    QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -31,8 +33,10 @@ from app.ui.editor.csv_import_dialog import CSVImportDialog
 from app.ui.remote_control.control_panel import ControlPanel
 from app.ui.remote_control.log_panel import LogPanel
 from app.audio.transcriber import TranscriptionManager
+from app.audio.transcript_writer import TranscriptWriter
 from app.data import file_996
 from app.data.models import ScannerConfig, Channel
+from app.data.radio_connection import RadioConnection
 
 log = logging.getLogger(__name__)
 
@@ -43,9 +47,17 @@ class _ConnectWorker(QThread):
     success = pyqtSignal(str, str)
     failure = pyqtSignal(str)
 
-    def __init__(self, port_name: str, parent=None) -> None:
+    def __init__(
+        self,
+        port_name: str,
+        audio_device_index: int | None = None,
+        transcription_enabled: bool = False,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._port_name = port_name
+        self.audio_device_index = audio_device_index
+        self.transcription_enabled = transcription_enabled
         self.conn: serial.Serial | None = None
 
     def run(self) -> None:
@@ -67,27 +79,33 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.resize(1280, 780)
 
-        self._conn: serial.Serial | None = None
-        self._proto: ScannerProtocol | None = None
-        self._current_port: str | None = None
+        self._radios: list[RadioConnection] = []
         self._connect_worker: _ConnectWorker | None = None
         self._config: ScannerConfig | None = None
-        self._scanner_model: str = ""
-        self._transcription_manager = TranscriptionManager(parent=self)
+        self._shared_writer = TranscriptWriter()
 
         self._build_menu()
         self._build_central()
         self._build_status_bar()
         self._update_connection_ui()
         self._update_title()
-        self._transcription_manager.apply_settings()
 
         # Auto-connect if the user has enabled it in preferences.
         settings = load_prefs()
         if settings.value("serial/auto_connect", False, type=bool):
             port = settings.value("serial/default_port", "")
             if port:
-                QTimer.singleShot(500, lambda: self._start_connect(port))
+                device_index = settings.value(f"serial/{port}/audio_device_index", None)
+                if device_index is not None:
+                    try:
+                        device_index = int(device_index)
+                    except (ValueError, TypeError):
+                        device_index = None
+                tx_enabled = settings.value(f"serial/{port}/transcription_enabled", False, type=bool)
+                QTimer.singleShot(
+                    500,
+                    lambda: self._start_connect(port, device_index, tx_enabled),
+                )
 
     # ------------------------------------------------------------------
     # Menu
@@ -187,6 +205,17 @@ class MainWindow(QMainWindow):
         editor_layout = QVBoxLayout(editor_widget)
         editor_layout.setContentsMargins(0, 0, 0, 0)
 
+        # Radio picker row
+        picker_row = QHBoxLayout()
+        picker_row.setContentsMargins(6, 4, 6, 0)
+        picker_row.addWidget(QLabel("Radio:"))
+        self._radio_picker = QComboBox()
+        self._radio_picker.setMinimumWidth(160)
+        self._radio_picker.currentIndexChanged.connect(self._on_radio_picker_changed)
+        picker_row.addWidget(self._radio_picker)
+        picker_row.addStretch()
+        editor_layout.addLayout(picker_row)
+
         self._editor_splitter = QSplitter(Qt.Orientation.Horizontal)
 
         self._systems_panel = SystemsPanel()
@@ -215,14 +244,14 @@ class MainWindow(QMainWindow):
 
         rc_splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        self._control_panel = ControlPanel()
-        self._control_panel.setMaximumWidth(260)
+        # Left side: one tab per connected radio (ControlPanel per tab)
+        self._radio_tabs = QTabWidget()
+        self._radio_tabs.setMaximumWidth(280)
 
         self._log_panel = LogPanel()
-        self._log_panel.channel_info_updated.connect(self._control_panel.update_display)
-        self._log_panel.set_transcription_manager(self._transcription_manager)
+        self._log_panel.channel_info_updated.connect(self._on_channel_info_updated)
 
-        rc_splitter.addWidget(self._control_panel)
+        rc_splitter.addWidget(self._radio_tabs)
         rc_splitter.addWidget(self._log_panel)
         rc_splitter.setStretchFactor(0, 0)
         rc_splitter.setStretchFactor(1, 1)
@@ -240,11 +269,8 @@ class MainWindow(QMainWindow):
         bar = QStatusBar()
         self.setStatusBar(bar)
         self._status_conn_label = QLabel()
-        self._status_model_label = QLabel()
         self._status_file_label = QLabel()
         bar.addPermanentWidget(self._status_conn_label)
-        bar.addPermanentWidget(QLabel("  |  "))
-        bar.addPermanentWidget(self._status_model_label)
         bar.addPermanentWidget(QLabel("  |  "))
         bar.addPermanentWidget(self._status_file_label)
 
@@ -252,22 +278,30 @@ class MainWindow(QMainWindow):
     # State helpers
     # ------------------------------------------------------------------
 
+    def _active_radio(self) -> RadioConnection | None:
+        """Return the RadioConnection currently selected in the editor radio picker."""
+        if not self._radios:
+            return None
+        label = self._radio_picker.currentData()
+        for r in self._radios:
+            if r.label == label:
+                return r
+        return self._radios[0] if self._radios else None
+
     def _update_connection_ui(self) -> None:
-        connected = self._conn is not None and self._conn.is_open
-        self._connect_action.setEnabled(not connected)
+        connected = len(self._radios) > 0
+        self._connect_action.setEnabled(True)  # always allow adding another radio
         self._disconnect_action.setEnabled(connected)
         self._upload_action.setEnabled(connected and self._config is not None)
         self._download_action.setEnabled(connected)
-        self._control_panel.set_protocol(self._proto if connected else None)
-        self._log_panel.set_protocol(self._proto if connected else None)
 
         if connected:
-            self._status_conn_label.setText(f"Connected: {self._current_port}")
+            parts = [f"{r.label}: {r.scanner_model} @ {r.port_name}" for r in self._radios]
+            self._status_conn_label.setText("  |  ".join(parts))
             self._status_conn_label.setStyleSheet("color: green; font-weight: bold;")
         else:
             self._status_conn_label.setText("Not connected")
             self._status_conn_label.setStyleSheet("color: gray;")
-            self._status_model_label.setText("")
 
     def _update_title(self) -> None:
         if self._config and self._config.file_path:
@@ -277,10 +311,11 @@ class MainWindow(QMainWindow):
         else:
             self.setWindowTitle(APP_NAME)
         has_config = self._config is not None
+        connected = len(self._radios) > 0
         self._save_action.setEnabled(has_config)
         self._save_as_action.setEnabled(has_config)
         self._import_csv_action.setEnabled(has_config)
-        self._upload_action.setEnabled(self._conn is not None and has_config)
+        self._upload_action.setEnabled(connected and has_config)
 
     def _update_file_status(self) -> None:
         if self._config and self._config.file_path:
@@ -298,8 +333,39 @@ class MainWindow(QMainWindow):
             self._status_file_label.setText("")
 
     # ------------------------------------------------------------------
+    # Remote Control routing
+    # ------------------------------------------------------------------
+
+    def _on_channel_info_updated(self, radio_label: str, info: dict) -> None:
+        """Route channel info to the correct ControlPanel tab."""
+        for i in range(self._radio_tabs.count()):
+            widget = self._radio_tabs.widget(i)
+            if isinstance(widget, ControlPanel) and widget.radio_label == radio_label:
+                widget.update_display(info)
+                break
+
+    # ------------------------------------------------------------------
     # Editor events
     # ------------------------------------------------------------------
+
+    def _on_radio_picker_changed(self) -> None:
+        radio = self._active_radio()
+        if radio and radio.config is not None:
+            self._config = radio.config
+            self._systems_panel.load_config(self._config)
+            self._channel_editor.set_config(self._config)
+            self._channel_editor.clear()
+            self._channel_editor.set_scanner_model(radio.scanner_model)
+        else:
+            # Radio has no downloaded config yet — show empty editor.
+            self._config = None
+            self._systems_panel.load_config(None)
+            self._channel_editor.set_config(None)
+            self._channel_editor.clear()
+            if radio:
+                self._channel_editor.set_scanner_model(radio.scanner_model)
+        self._update_title()
+        self._update_file_status()
 
     def _on_system_selected(self, s_idx: int) -> None:
         if self._config:
@@ -424,22 +490,43 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_connect(self) -> None:
-        dlg = ConnectionSettingsDialog(current_port=self._current_port, parent=self)
+        already_connected = {r.port_name for r in self._radios}
+        dlg = ConnectionSettingsDialog(
+            excluded_ports=already_connected,
+            parent=self,
+        )
         if dlg.exec() != ConnectionSettingsDialog.DialogCode.Accepted:
             return
         port_name = dlg.selected_port
         if not port_name:
             return
-        self._start_connect(port_name)
+        self._start_connect(
+            port_name,
+            dlg.selected_audio_device_index,
+            dlg.selected_transcription_enabled,
+        )
 
-    def _start_connect(self, port_name: str) -> None:
+    def _start_connect(
+        self,
+        port_name: str,
+        audio_device_index: int | None = None,
+        transcription_enabled: bool = False,
+    ) -> None:
         """Begin an async connection attempt to the named serial port."""
         self.statusBar().showMessage(f"Connecting to {port_name}…")
         self._connect_action.setEnabled(False)
 
-        worker = _ConnectWorker(port_name, parent=self)
+        worker = _ConnectWorker(
+            port_name,
+            audio_device_index=audio_device_index,
+            transcription_enabled=transcription_enabled,
+            parent=self,
+        )
         worker.success.connect(
-            lambda m, v: self._on_connect_success(port_name, worker.conn, m, v)
+            lambda m, v: self._on_connect_success(
+                port_name, worker.conn, m, v,
+                worker.audio_device_index, worker.transcription_enabled,
+            )
         )
         worker.failure.connect(self._on_connect_failure)
         worker.finished.connect(worker.deleteLater)
@@ -447,17 +534,56 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _on_connect_success(
-        self, port_name: str, conn: serial.Serial, model: str, version: str
+        self,
+        port_name: str,
+        conn: serial.Serial,
+        model: str,
+        version: str,
+        audio_device_index: int | None,
+        transcription_enabled: bool,
     ) -> None:
-        self._conn = conn
-        self._proto = ScannerProtocol(conn)
-        self._current_port = port_name
-        self._scanner_model = model
+        label = f"Radio {len(self._radios) + 1}"
+        proto = ScannerProtocol(conn)
+        radio = RadioConnection(
+            label=label,
+            port_name=port_name,
+            conn=conn,
+            proto=proto,
+            scanner_model=model,
+            audio_device_index=audio_device_index,
+        )
+
+        # Create a per-radio transcription manager; inject the shared writer.
+        mgr = TranscriptionManager(
+            parent=self,
+            device_index=audio_device_index,
+            radio_label=label,
+            enabled=transcription_enabled,
+        )
+        mgr.set_transcript_writer(self._shared_writer)
+        mgr.apply_settings()
+        radio.transcription_manager = mgr
+
+        self._radios.append(radio)
+
+        # Register with log panel (also connects transcription signal).
+        self._log_panel.add_radio(radio)
+
+        # Add a ControlPanel tab for this radio.
+        cp = ControlPanel(radio_label=label, parent=self)
+        cp.set_protocol(proto)
+        self._radio_tabs.addTab(cp, label)
+
+        # Update editor radio picker.
+        self._radio_picker.addItem(label, userData=label)
+        if self._radio_picker.count() == 1:
+            # First radio — auto-select it.
+            self._radio_picker.setCurrentIndex(0)
+
         self._channel_editor.set_scanner_model(model)
         self._update_connection_ui()
-        self._status_model_label.setText(f"Model: {model}  FW: {version}")
         self.statusBar().showMessage(f"Connected to {model} on {port_name}", 5000)
-        log.info("Connected to %s (FW %s) on %s", model, version, port_name)
+        log.info("Connected to %s (FW %s) on %s [%s]", model, version, port_name, label)
 
     def _on_connect_failure(self, error: str) -> None:
         self._update_connection_ui()
@@ -472,12 +598,31 @@ class MainWindow(QMainWindow):
         )
 
     def _on_disconnect(self) -> None:
-        port_manager.close_port(self._conn)
-        self._conn = None
-        self._proto = None
-        self._current_port = None
-        self._scanner_model = ""
-        self._channel_editor.set_scanner_model("")
+        radio = self._active_radio()
+        if radio is None:
+            return
+
+        # Remove from log panel (ends active transmissions).
+        self._log_panel.remove_radio(radio.label)
+
+        # Shut down transcription manager.
+        if radio.transcription_manager:
+            radio.transcription_manager.shutdown()
+
+        # Remove ControlPanel tab.
+        for i in range(self._radio_tabs.count()):
+            if self._radio_tabs.tabText(i) == radio.label:
+                self._radio_tabs.removeTab(i)
+                break
+
+        # Remove from picker.
+        idx = self._radio_picker.findData(radio.label)
+        if idx >= 0:
+            self._radio_picker.removeItem(idx)
+
+        self._radios.remove(radio)
+        port_manager.close_port(radio.conn)
+
         self._update_connection_ui()
         self.statusBar().showMessage("Disconnected", 3000)
 
@@ -486,28 +631,30 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_upload(self) -> None:
-        if not self._conn or not self._config:
+        radio = self._active_radio()
+        if radio is None or self._config is None:
             QMessageBox.warning(self, "Not Ready", "Connect to the scanner and open a file first.")
             return
         from app.ui.programmer.upload_dialog import UploadDialog
-        self._log_panel.pause_polling()
+        self._log_panel.pause_polling(radio.label)
         try:
-            dlg = UploadDialog(self._proto, self._config, scanner_model=self._scanner_model, parent=self)
+            dlg = UploadDialog(radio.proto, self._config, scanner_model=radio.scanner_model, parent=self)
             dlg.exec()
         finally:
-            self._log_panel.resume_polling()
+            self._log_panel.resume_polling(radio.label)
 
     def _on_download(self) -> None:
-        if not self._conn:
+        radio = self._active_radio()
+        if radio is None:
             QMessageBox.warning(self, "Not Connected", "Connect to the scanner first.")
             return
         from app.ui.programmer.download_dialog import DownloadDialog
-        self._log_panel.pause_polling()
-        dlg = DownloadDialog(self._proto, scanner_model=self._scanner_model or "", parent=self)
+        self._log_panel.pause_polling(radio.label)
+        dlg = DownloadDialog(radio.proto, scanner_model=radio.scanner_model or "", parent=self)
         try:
             result = dlg.exec()
         finally:
-            self._log_panel.resume_polling()
+            self._log_panel.resume_polling(radio.label)
         if result and dlg.downloaded_config:
             config = dlg.downloaded_config
             if self._config and self._config.modified:
@@ -518,6 +665,7 @@ class MainWindow(QMainWindow):
                 )
                 if reply != QMessageBox.StandardButton.Yes:
                     return
+            radio.config = config
             self._config = config
             self._systems_panel.load_config(config)
             self._channel_editor.set_config(config)
@@ -555,14 +703,17 @@ class MainWindow(QMainWindow):
             )
 
     def _on_preferences(self) -> None:
+        mgr = self._radios[0].transcription_manager if self._radios else None
         dlg = PreferencesDialog(
             parent=self,
-            on_recapture_noise_profile=self._transcription_manager.recapture_noise_profile,
+            on_recapture_noise_profile=mgr.recapture_noise_profile if mgr else lambda: None,
         )
         if dlg.exec():
             settings = load_prefs()
             apply_theme(settings.value("appearance/theme", "System default"))
-            self._transcription_manager.apply_settings()
+            for radio in self._radios:
+                if radio.transcription_manager:
+                    radio.transcription_manager.apply_settings()
 
     def _on_about(self) -> None:
         from pathlib import Path
@@ -591,6 +742,8 @@ class MainWindow(QMainWindow):
             if reply != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
-        self._transcription_manager.shutdown()
-        port_manager.close_port(self._conn)
+        for radio in self._radios:
+            if radio.transcription_manager:
+                radio.transcription_manager.shutdown()
+            port_manager.close_port(radio.conn)
         super().closeEvent(event)

@@ -954,7 +954,10 @@ class UploadDialog(QDialog):
         self._close_btn.setEnabled(True)
 
     def closeEvent(self, event) -> None:
-        if self._worker and self._worker.isRunning():
-            self._worker.abort()
-            self._worker.wait(3000)
+        try:
+            if self._worker and self._worker.isRunning():
+                self._worker.abort()
+                self._worker.wait(3000)
+        except RuntimeError:
+            pass  # C++ object already deleted after upload completed
         super().closeEvent(event)

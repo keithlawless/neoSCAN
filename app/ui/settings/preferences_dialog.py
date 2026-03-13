@@ -141,33 +141,13 @@ class PreferencesDialog(QDialog):
 
         layout.addWidget(appearance_box)
 
-        # --- Transcription ---
-        tx_box = QGroupBox("Transcription")
-        tx_form = QFormLayout(tx_box)
+        # --- Audio Passthrough ---
+        pt_box = QGroupBox("Audio Passthrough")
+        pt_form = QFormLayout(pt_box)
 
-        self._tx_enable = QCheckBox("Enable audio transcription (requires openai-whisper)")
-        self._tx_enable.stateChanged.connect(self._on_tx_enable_changed)
-        tx_form.addRow("", self._tx_enable)
-
-        # Audio input device
-        device_row = QHBoxLayout()
-        self._tx_device_combo = QComboBox()
-        self._tx_device_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-        self._tx_device_combo.setMinimumWidth(200)
-        tx_refresh_btn = QPushButton("Refresh")
-        tx_refresh_btn.setFixedWidth(70)
-        tx_refresh_btn.clicked.connect(self._refresh_audio_devices)
-        device_row.addWidget(self._tx_device_combo, 1)
-        device_row.addWidget(tx_refresh_btn)
-        self._tx_device_label = QLabel("Audio input device:")
-        tx_form.addRow(self._tx_device_label, device_row)
-        self._refresh_audio_devices()
-
-        # Pass-through
         self._pt_enable = QCheckBox("Pass-through to speakers")
         self._pt_enable.stateChanged.connect(self._on_pt_enable_changed)
-        self._pt_enable_label = QLabel("Audio pass-through:")
-        tx_form.addRow(self._pt_enable_label, self._pt_enable)
+        pt_form.addRow("", self._pt_enable)
 
         pt_device_row = QHBoxLayout()
         self._pt_device_combo = QComboBox()
@@ -179,7 +159,7 @@ class PreferencesDialog(QDialog):
         pt_device_row.addWidget(self._pt_device_combo, 1)
         pt_device_row.addWidget(pt_refresh_btn)
         self._pt_device_label = QLabel("Output device:")
-        tx_form.addRow(self._pt_device_label, pt_device_row)
+        pt_form.addRow(self._pt_device_label, pt_device_row)
         self._refresh_output_devices()
 
         self._pt_recapture_btn = QPushButton("Re-capture noise profile")
@@ -189,13 +169,18 @@ class PreferencesDialog(QDialog):
         )
         self._pt_recapture_btn.clicked.connect(self._on_recapture_clicked)
         self._pt_recapture_label = QLabel("")
-        tx_form.addRow(self._pt_recapture_label, self._pt_recapture_btn)
+        pt_form.addRow(self._pt_recapture_label, self._pt_recapture_btn)
+
+        layout.addWidget(pt_box)
+
+        # --- Transcription ---
+        tx_box = QGroupBox("Transcription")
+        tx_form = QFormLayout(tx_box)
 
         # Whisper model size
         self._tx_model_combo = QComboBox()
         self._tx_model_combo.addItems(["tiny", "base", "small", "medium", "large"])
-        self._tx_model_label = QLabel("Whisper model:")
-        tx_form.addRow(self._tx_model_label, self._tx_model_combo)
+        tx_form.addRow("Whisper model:", self._tx_model_combo)
 
         # Transcription language
         self._tx_lang_combo = QComboBox()
@@ -203,8 +188,7 @@ class PreferencesDialog(QDialog):
         self._tx_lang_combo.addItem("Auto-detect", None)
         for name, code in WHISPER_LANGUAGES:
             self._tx_lang_combo.addItem(name, code)
-        self._tx_lang_label = QLabel("Language:")
-        tx_form.addRow(self._tx_lang_label, self._tx_lang_combo)
+        tx_form.addRow("Language:", self._tx_lang_combo)
 
         # Transcript directory
         tx_dir_row = QHBoxLayout()
@@ -217,8 +201,7 @@ class PreferencesDialog(QDialog):
         tx_browse_btn.clicked.connect(self._browse_transcript_dir)
         tx_dir_row.addWidget(self._tx_dir_edit, 1)
         tx_dir_row.addWidget(tx_browse_btn)
-        self._tx_dir_label = QLabel("Transcript directory:")
-        tx_form.addRow(self._tx_dir_label, tx_dir_row)
+        tx_form.addRow("Transcript directory:", tx_dir_row)
 
         layout.addWidget(tx_box)
 
@@ -252,25 +235,6 @@ class PreferencesDialog(QDialog):
         if directory:
             self._log_path_edit.setText(directory)
 
-    def _refresh_audio_devices(self) -> None:
-        """Populate the audio input device combo from sounddevice."""
-        current_data = self._tx_device_combo.currentData()
-        self._tx_device_combo.clear()
-        self._tx_device_combo.addItem("(none)", None)
-        try:
-            import sounddevice as sd
-            devices = sd.query_devices()
-            for i, dev in enumerate(devices):
-                if dev["max_input_channels"] > 0:
-                    self._tx_device_combo.addItem(f"{i}: {dev['name']}", i)
-        except Exception:
-            self._tx_device_combo.addItem("(sounddevice not available)", None)
-        # Restore previous selection
-        for idx in range(self._tx_device_combo.count()):
-            if self._tx_device_combo.itemData(idx) == current_data:
-                self._tx_device_combo.setCurrentIndex(idx)
-                break
-
     def _refresh_output_devices(self) -> None:
         """Populate the audio output device combo from sounddevice."""
         current_data = self._pt_device_combo.currentData()
@@ -301,23 +265,10 @@ class PreferencesDialog(QDialog):
             self._on_recapture_noise_profile()
 
     def _on_pt_enable_changed(self, state: int) -> None:
-        pt_on = bool(state) and self._tx_enable.isChecked()
+        pt_on = bool(state)
         for w in (self._pt_device_label, self._pt_device_combo,
                   self._pt_recapture_label, self._pt_recapture_btn):
             w.setEnabled(pt_on)
-
-    def _on_tx_enable_changed(self, state: int) -> None:
-        enabled = bool(state)
-        for w in (
-            self._tx_device_label, self._tx_device_combo,
-            self._pt_enable_label, self._pt_enable,
-            self._tx_model_label, self._tx_model_combo,
-            self._tx_lang_label, self._tx_lang_combo,
-            self._tx_dir_label, self._tx_dir_edit,
-        ):
-            w.setEnabled(enabled)
-        # pt sub-widgets depend on both tx enabled AND pt checked
-        self._on_pt_enable_changed(self._pt_enable.checkState())
 
     # ------------------------------------------------------------------
     # Load / Save
@@ -341,23 +292,6 @@ class PreferencesDialog(QDialog):
         idx = self._theme_combo.findText(theme)
         if idx >= 0:
             self._theme_combo.setCurrentIndex(idx)
-
-        # Transcription
-        tx_enabled = self._settings.value("transcription/enabled", False, type=bool)
-        self._tx_enable.setChecked(tx_enabled)
-        # _on_tx_enable_changed fires from setChecked, but call explicitly in case state=0 (unchecked)
-        self._on_tx_enable_changed(tx_enabled)
-
-        saved_device = self._settings.value("transcription/device_index", None)
-        if saved_device is not None:
-            try:
-                saved_device = int(saved_device)
-            except (ValueError, TypeError):
-                saved_device = None
-        for i in range(self._tx_device_combo.count()):
-            if self._tx_device_combo.itemData(i) == saved_device:
-                self._tx_device_combo.setCurrentIndex(i)
-                break
 
         pt_enabled = self._settings.value("transcription/passthrough_enabled", False, type=bool)
         self._pt_enable.setChecked(pt_enabled)
@@ -394,9 +328,6 @@ class PreferencesDialog(QDialog):
         self._settings.setValue("appearance/theme", self._theme_combo.currentText())
 
         # Transcription
-        self._settings.setValue("transcription/enabled", self._tx_enable.isChecked())
-        self._settings.setValue("transcription/device_index",
-                                self._tx_device_combo.currentData())
         self._settings.setValue("transcription/passthrough_enabled",
                                 self._pt_enable.isChecked())
         self._settings.setValue("transcription/output_device_index",

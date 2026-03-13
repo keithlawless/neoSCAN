@@ -1,5 +1,5 @@
 """
-Transmission log panel — polls the scanner and records all transmissions.
+Transmission log panel — polls one or more scanners and records all transmissions.
 """
 from __future__ import annotations
 
@@ -7,12 +7,11 @@ import csv
 import logging
 import time
 from datetime import datetime
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QFileDialog,
-    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -26,26 +25,31 @@ from PyQt6.QtWidgets import (
 
 from app.serial.protocol import ScannerProtocol, ProtocolError
 
+if TYPE_CHECKING:
+    from app.data.radio_connection import RadioConnection
+
 log = logging.getLogger(__name__)
 
-POLL_INTERVAL_MS = 150   # poll scanner every 150ms
+POLL_INTERVAL_MS = 150   # poll scanners every 150ms
 
 # Log table columns
-COL_TIME = 0
-COL_DURATION = 1
-COL_CH_NAME = 2
-COL_FREQ = 3
-COL_SYS = 4
-COL_GRP = 5
-COL_MOD = 6
-COL_TRANSCRIPT = 7
-HEADERS = ["Time", "Duration", "Channel", "Freq / TGID", "System", "Group", "Mod", "Transcript"]
+COL_RADIO = 0
+COL_TIME = 1
+COL_DURATION = 2
+COL_CH_NAME = 3
+COL_FREQ = 4
+COL_SYS = 5
+COL_GRP = 6
+COL_MOD = 7
+COL_TRANSCRIPT = 8
+HEADERS = ["Radio", "Time", "Duration", "Channel", "Freq / TGID", "System", "Group", "Mod", "Transcript"]
 
 
 class _TransmissionEntry:
-    def __init__(self, info: dict) -> None:
+    def __init__(self, info: dict, radio_label: str = "") -> None:
         self.start_time = datetime.now()
         self.end_time: Optional[datetime] = None
+        self.radio_label = radio_label
         self.channel = info.get("ch_name", "")
         self.frequency = info.get("frequency", "")
         self.system = info.get("sys_name", "")
@@ -85,23 +89,24 @@ class _TransmissionEntry:
 
 class LogPanel(QWidget):
     """
-    Polls the scanner for active transmissions and displays a running log.
-    Emits channel_info_updated so the control panel can update its display.
+    Polls one or more scanners for active transmissions and displays a merged log.
+    Emits channel_info_updated(radio_label, info) so each ControlPanel can filter
+    on its own label and update its display.
     """
 
-    channel_info_updated = pyqtSignal(dict)
+    channel_info_updated = pyqtSignal(str, dict)   # (radio_label, channel_info)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._proto: ScannerProtocol | None = None
+        self._radios: list[RadioConnection] = []
         self._timer = QTimer(self)
         self._timer.setInterval(POLL_INTERVAL_MS)
         self._timer.timeout.connect(self._poll)
-        self._logging = False  # True only when user has started logging
+        self._logging = False
         self._entries: list[_TransmissionEntry] = []
-        self._active: Optional[_TransmissionEntry] = None
-        self._last_info: Optional[dict] = None
-        self._transcription_manager = None
+        self._active_entries: dict[str, _TransmissionEntry | None] = {}  # label → active entry
+        self._active_entry_rows: dict[str, int] = {}                     # label → row index
+        self._paused_labels: set[str] = set()
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -142,45 +147,61 @@ class LogPanel(QWidget):
 
         self._set_controls(connected=False, logging=False)
 
-    def pause_polling(self) -> None:
-        """Temporarily stop polling (e.g. while program mode is active). Preserves logging state."""
-        self._timer.stop()
+    # ------------------------------------------------------------------
+    # Public API — multi-radio
+    # ------------------------------------------------------------------
 
-    def resume_polling(self) -> None:
-        """Resume polling after a pause, if still connected."""
-        if self._proto:
+    def add_radio(self, radio: RadioConnection) -> None:
+        """Register a connected radio and begin polling it."""
+        self._radios.append(radio)
+        self._active_entries[radio.label] = None
+        if radio.transcription_manager is not None:
+            radio.transcription_manager.transcription_ready.connect(
+                lambda ri, text, job, r=radio: self._on_transcription_ready(ri, text, job, r)
+            )
+        if not self._timer.isActive():
             self._timer.start()
+        self._set_controls(connected=True, logging=self._logging)
 
-    def set_protocol(self, proto: ScannerProtocol | None) -> None:
-        self._proto = proto
-        if proto:
-            self._timer.start()
-        else:
+    def remove_radio(self, label: str) -> None:
+        """Unregister a radio (called on disconnect). Ends any active transmission."""
+        entry = self._active_entries.get(label)
+        if entry is not None:
+            row_index = self._active_entry_rows.pop(label, None)
+            entry.end_time = datetime.now()
+            if row_index is not None:
+                self._refresh_row(row_index)
+            self._active_entries[label] = None
+
+        self._radios = [r for r in self._radios if r.label != label]
+        self._active_entries.pop(label, None)
+        self._paused_labels.discard(label)
+
+        if not self._radios:
             self._logging = False
             self._timer.stop()
-            if self._active:
-                self._active.end_time = datetime.now()
-                self._refresh_row(len(self._entries) - 1)
-                self._active = None
-        self._set_controls(connected=proto is not None, logging=self._logging)
+        self._set_controls(connected=len(self._radios) > 0, logging=self._logging)
 
-    def set_transcription_manager(self, manager) -> None:
-        """Wire up the TranscriptionManager. Call once from MainWindow after creation."""
-        self._transcription_manager = manager
-        manager.transcription_ready.connect(self._on_transcription_ready)
+    def pause_polling(self, label: str | None = None) -> None:
+        """Pause polling for one radio (or all if label is None)."""
+        if label is not None:
+            self._paused_labels.add(label)
+        else:
+            for r in self._radios:
+                self._paused_labels.add(r.label)
 
-    def _on_transcription_ready(self, row_index: int, text: str, job) -> None:
-        try:
-            if row_index < 0 or row_index >= len(self._entries):
-                return
-            entry = self._entries[row_index]
-            entry.transcript = text
-            entry.transcript_pending = False
-            self._refresh_row(row_index)
-            if self._transcription_manager and job is not None:
-                self._transcription_manager.on_transcription_done(row_index, text, job)
-        except Exception:
-            log.exception("Error handling transcription result for row %d", row_index)
+    def resume_polling(self, label: str | None = None) -> None:
+        """Resume polling for one radio (or all if label is None)."""
+        if label is not None:
+            self._paused_labels.discard(label)
+        else:
+            self._paused_labels.clear()
+        if self._radios and not self._timer.isActive():
+            self._timer.start()
+
+    # ------------------------------------------------------------------
+    # Logging controls
+    # ------------------------------------------------------------------
 
     def _set_controls(self, connected: bool, logging: bool) -> None:
         self._start_btn.setEnabled(connected and not logging)
@@ -188,7 +209,7 @@ class LogPanel(QWidget):
         self._export_btn.setEnabled(len(self._entries) > 0)
 
     def _start_logging(self) -> None:
-        if not self._proto:
+        if not self._radios:
             return
         self._logging = True
         self._status_label.setText("Logging…")
@@ -198,54 +219,94 @@ class LogPanel(QWidget):
 
     def _stop_logging(self) -> None:
         self._logging = False
-        if self._active:
-            self._active.end_time = datetime.now()
-            self._refresh_row(len(self._entries) - 1)
-            self._active = None
+        for label in list(self._active_entries.keys()):
+            entry = self._active_entries.get(label)
+            if entry is not None:
+                row_index = self._active_entry_rows.pop(label, None)
+                entry.end_time = datetime.now()
+                if row_index is not None:
+                    self._refresh_row(row_index)
+                self._active_entries[label] = None
         self._status_label.setText("Stopped.")
         self._status_label.setStyleSheet("font-size: 11px; color: gray;")
-        self._set_controls(connected=self._proto is not None, logging=False)
+        self._set_controls(connected=len(self._radios) > 0, logging=False)
 
     def _clear_log(self) -> None:
         self._entries.clear()
-        self._active = None
+        self._active_entries = {label: None for label in self._active_entries}
+        self._active_entry_rows.clear()
         self._table.setRowCount(0)
-        self._set_controls(connected=self._proto is not None, logging=self._timer.isActive())
+        self._set_controls(connected=len(self._radios) > 0, logging=self._timer.isActive())
+
+    # ------------------------------------------------------------------
+    # Polling
+    # ------------------------------------------------------------------
 
     def _poll(self) -> None:
-        if not self._proto:
-            return
-        try:
-            info = self._proto.get_received_channel_info()
+        for radio in list(self._radios):
+            if radio.label in self._paused_labels:
+                continue
+            try:
+                info = radio.proto.get_received_channel_info()
 
-            if info:
-                self.channel_info_updated.emit(info)
-                if self._logging:
-                    if self._active is None:
-                        # New transmission started
-                        entry = _TransmissionEntry(info)
-                        self._entries.append(entry)
-                        self._active = entry
-                        self._add_table_row(entry)
-                        self._set_controls(connected=True, logging=True)
-                        if self._transcription_manager:
-                            self._transcription_manager.on_transmission_started()
-                    else:
-                        # Ongoing transmission — update duration in place
-                        self._refresh_row(len(self._entries) - 1)
-            else:
-                if self._logging and self._active is not None:
-                    # Transmission ended
-                    self._active.end_time = datetime.now()
-                    row_index = len(self._entries) - 1
-                    if self._transcription_manager:
-                        self._active.transcript_pending = True
-                    self._refresh_row(row_index)
-                    if self._transcription_manager:
-                        self._transcription_manager.on_transmission_ended(row_index, self._active)
-                    self._active = None
+                if info:
+                    self.channel_info_updated.emit(radio.label, info)
+                    if self._logging:
+                        label = radio.label
+                        if self._active_entries.get(label) is None:
+                            # New transmission started
+                            entry = _TransmissionEntry(info, radio_label=label)
+                            row_index = len(self._entries)
+                            self._entries.append(entry)
+                            self._active_entries[label] = entry
+                            self._active_entry_rows[label] = row_index
+                            self._add_table_row(entry)
+                            self._set_controls(connected=True, logging=True)
+                            if radio.transcription_manager:
+                                radio.transcription_manager.on_transmission_started()
+                        else:
+                            # Ongoing transmission — update duration in place
+                            self._refresh_row(self._active_entry_rows[label])
+                else:
+                    if self._logging and self._active_entries.get(radio.label) is not None:
+                        # Transmission ended
+                        label = radio.label
+                        entry = self._active_entries[label]
+                        row_index = self._active_entry_rows.pop(label)
+                        entry.end_time = datetime.now()
+                        tx_active = (
+                            radio.transcription_manager is not None
+                            and radio.transcription_manager.is_enabled
+                        )
+                        if tx_active:
+                            entry.transcript_pending = True
+                        self._refresh_row(row_index)
+                        if tx_active:
+                            radio.transcription_manager.on_transmission_ended(row_index, entry)
+                        self._active_entries[label] = None
+            except Exception:
+                log.exception("Error polling %s — continuing", radio.label)
+
+    # ------------------------------------------------------------------
+    # Transcription callback
+    # ------------------------------------------------------------------
+
+    def _on_transcription_ready(self, row_index: int, text: str, job, radio: RadioConnection) -> None:
+        try:
+            if row_index < 0 or row_index >= len(self._entries):
+                return
+            entry = self._entries[row_index]
+            entry.transcript = text
+            entry.transcript_pending = False
+            self._refresh_row(row_index)
+            if radio.transcription_manager is not None and job is not None:
+                radio.transcription_manager.on_transcription_done(row_index, text, job)
         except Exception:
-            log.exception("Error in poll — stopping timer")
+            log.exception("Error handling transcription result for row %d", row_index)
+
+    # ------------------------------------------------------------------
+    # Table helpers
+    # ------------------------------------------------------------------
 
     def _add_table_row(self, entry: _TransmissionEntry) -> None:
         row = self._table.rowCount()
@@ -265,6 +326,7 @@ class LogPanel(QWidget):
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             return item
 
+        self._table.setItem(row, COL_RADIO, _cell(entry.radio_label))
         self._table.setItem(row, COL_TIME, _cell(entry.start_time.strftime("%H:%M:%S")))
         self._table.setItem(row, COL_DURATION, _cell(entry.duration))
         self._table.setItem(row, COL_CH_NAME, _cell(entry.channel))
@@ -277,11 +339,14 @@ class LogPanel(QWidget):
         elif entry.transcript:
             tx_text = entry.transcript
         elif entry.end_time is not None:
-            # Transcription finished but returned no speech
             tx_text = "(no speech)"
         else:
             tx_text = ""
         self._table.setItem(row, COL_TRANSCRIPT, _cell(tx_text))
+
+    # ------------------------------------------------------------------
+    # CSV export
+    # ------------------------------------------------------------------
 
     def _export_csv(self) -> None:
         if not self._entries:
@@ -295,7 +360,7 @@ class LogPanel(QWidget):
             with open(path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 writer.writerow([
-                    "Time", "End Time", "Duration (s)", "Channel",
+                    "Radio", "Time", "End Time", "Duration (s)", "Channel",
                     "Frequency", "System", "Group", "Modulation", "Transcript"
                 ])
                 for e in self._entries:
@@ -306,6 +371,7 @@ class LogPanel(QWidget):
                         (datetime.now() - e.start_time).total_seconds()
                     )
                     writer.writerow([
+                        e.radio_label,
                         e.start_time.strftime("%Y-%m-%d %H:%M:%S"),
                         end_str, f"{dur:.1f}",
                         e.channel, e.freq_display(),

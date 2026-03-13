@@ -141,8 +141,9 @@ class ControlPanel(QWidget):
 
     key_pressed = pyqtSignal(str)  # key_code sent to scanner
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, radio_label: str = "", parent=None) -> None:
         super().__init__(parent)
+        self.radio_label = radio_label
         self._proto: ScannerProtocol | None = None
         self._build_ui()
 
