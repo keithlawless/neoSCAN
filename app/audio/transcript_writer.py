@@ -91,7 +91,21 @@ class TranscriptWriter:
 
 
 def _fmt_freq(frequency: str) -> str:
+    if not frequency:
+        return "(unknown)"
+    # BCD996P2: 8-digit zero-padded integer (Hz/100), e.g. "01542350"
+    if len(frequency) == 8 and frequency.isdigit():
+        try:
+            return f"{int(frequency) / 10000.0:.4f} MHz"
+        except ValueError:
+            return frequency
+    # No decimal point → TGID
+    if "." not in frequency:
+        try:
+            return f"TGID {int(float(frequency))}"
+        except (ValueError, TypeError):
+            return frequency
     try:
         return f"{float(frequency):.4f} MHz"
     except (ValueError, TypeError):
-        return frequency or "(unknown)"
+        return frequency
