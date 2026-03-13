@@ -1,31 +1,37 @@
 # NeoSCAN
 
 A cross-platform desktop application for programming and remote-controlling
-Uniden BCT15-X radio scanners (and future Uniden models) via USB serial.
+Uniden radio scanners via USB serial.
 
 NeoSCAN is a modern replacement for the abandoned Windows-only FreeSCAN
 application. It runs on macOS, Windows, and Linux.
 
 ## Features
 
+- **Multi-Radio Support** — connect up to two scanners simultaneously, each
+  with its own tab, channel list, and remote control panel
 - **Channel Editor** — full tree view of Systems → Groups → Channels with
   inline editing and contextual help for every field
+- **Trunked System Support** — Motorola, P25, EDACS, and LTR trunked systems
+  with full TGID call-group download and upload
 - **.996 File Support** — open and save FreeSCAN `.996` files with full
   round-trip fidelity
 - **CSV Import** — import from any CSV file with intelligent header-based
   field mapping (RadioReference exports, etc.)
-- **Upload to Scanner** — program the BCT15-X/BCD996XT over USB with a
-  live progress log
+- **Upload to Scanner** — program the scanner over USB with a live progress log
 - **Download from Scanner** — read the current channel list from the scanner
   into the editor
 - **Remote Control** — virtual keypad to control the scanner from your
-  computer, with a live transmission log (channel, frequency, duration)
-- **Transmission Log Export** — save the remote control session log to CSV
+  computer, with a merged live transmission log across both radios
+- **Audio Transcription** — optional Whisper-based speech-to-text for each
+  radio; transcripts appear inline in the transmission log and are saved to a
+  text file
+- **Transmission Log Export** — save the session log to CSV
 
 ## Requirements
 
 - Python 3.11 or newer
-- A Uniden BCT15-X or BCD996XT scanner connected via USB
+- A supported Uniden scanner connected via USB
 
 ## Quick Start
 
@@ -45,6 +51,24 @@ pip install -e .
 # Run the app
 python main.py
 ```
+
+## Optional Dependencies
+
+| Package        | Purpose                                              |
+|----------------|------------------------------------------------------|
+| `openai-whisper` | Audio transcription (speech-to-text)               |
+| `sounddevice`  | Audio recording for transcription                    |
+| `noisereduce`  | Stationary noise reduction before transcription      |
+
+Install all optional features at once:
+
+```bash
+pip install openai-whisper sounddevice noisereduce
+```
+
+Transcription requires a supported audio input device (e.g. a USB sound card
+connected to the scanner's audio output). The Whisper model is downloaded
+automatically on first use.
 
 ## Development Setup
 
@@ -135,14 +159,19 @@ neo-scan/
   app/
     serial/
       port_manager.py              Serial port detection and connect/disconnect
-      protocol.py                  BCT15-X command send/receive layer
+      protocol.py                  Scanner command send/receive layer
       scanner_model.py             Model-specific field translation tables
     data/
       models.py                    ScannerConfig, System, Group, Channel dataclasses
       file_996.py                  .996 file parser and writer
       file_csv.py                  CSV import with fuzzy field mapping
+      radio_connection.py          Per-radio connection state (port, protocol, config)
+    audio/
+      recorder.py                  Audio capture via sounddevice
+      transcriber.py               Whisper transcription manager and worker thread
+      transcript_writer.py         Transcript file writer
     ui/
-      main_window.py               Main application window
+      main_window.py               Main application window (multi-radio tabs)
       editor/
         systems_panel.py           Tree view panel (Systems > Groups > Channels)
         channel_editor.py          Channel/group/system detail editor form
@@ -152,13 +181,12 @@ neo-scan/
         download_dialog.py         Download-from-scanner dialog with progress log
       remote_control/
         control_panel.py           Virtual scanner keypad and display
-        log_panel.py               Transmission logger with CSV export
+        log_panel.py               Multi-radio transmission logger with CSV export
       settings/
-        settings_dialog.py         COM port selection dialog
-        preferences_dialog.py      App preferences (port, theme, log path)
+        settings_dialog.py         Connection dialog (port, audio device, transcription)
+        preferences_dialog.py      App preferences (theme, Whisper model, transcript path)
   resources/
     icons/                         SVG source + PNG icons at multiple sizes
-    help_text/                     Help text files (to be added)
   tools/
     generate_icons.py              Regenerate PNG icons from SVG source
   neoscan.spec                     PyInstaller build spec (all platforms)
@@ -166,16 +194,22 @@ neo-scan/
   sample-data/
     sample.996                     Sample FreeSCAN file for testing
   reference/
-    BCD996XT_v1.04.00_Protocol.pdf Scanner USB protocol specification
+    BCD996XT_v1.04.00_Protocol.pdf   BCD996XT USB protocol specification
+    BCD996P2_Remote_Protocol_ver_1_03.pdf  BCD996P2 USB protocol specification
+    BCT15X_v1.03.00_Protocol.pdf     BCT15X USB protocol specification
 ```
 
 ## Scanner Compatibility
 
-Tested with: **BCT15X**, **BCD996XT**
+| Model    | Status | Notes |
+|----------|--------|-------|
+| BCT15X   | Tested | Conventional and trunked systems |
+| BCD996XT | Tested | Conventional and trunked systems |
+| BCD996P2 | Tested | Conventional, Motorola, and P25 trunked systems |
 
-The protocol implementation follows the BCD996XT v1.04.00 serial protocol
-specification (included in `reference/`). Other Uniden scanners using the
-same ASCII serial protocol should work with minor adjustments to
+The protocol implementation targets the BCD996XT v1.04.00 and BCD996P2 v1.03
+serial protocol specifications (included in `reference/`). Other Uniden scanners
+using the same ASCII serial protocol should work with minor adjustments to
 `scanner_model.py`.
 
 Communication parameters: **115200 baud, 8N1, no flow control**
@@ -184,15 +218,15 @@ On macOS the scanner typically appears as `/dev/cu.usbserial-XXXXXXXX`.
 On Windows it appears as `COMx`. NeoSCAN auto-detects and highlights the
 most likely port in the connection dialog.
 
-## Scanner Capacity (BCT15X / BCD996XT)
+## Scanner Capacity
 
-| Resource           | Maximum |
-|--------------------|---------|
-| Systems            | 700     |
-| Groups             | 277     |
-| Trunk channels     | 500     |
-| Trunk frequencies  | 6,000   |
-| Search lockouts    | 500     |
+| Resource           | BCT15X / BCD996XT | BCD996P2 |
+|--------------------|:-----------------:|:--------:|
+| Systems            | 700               | 500      |
+| Groups per system  | 277               | —        |
+| Channels           | —                 | 25,000   |
+| Trunk frequencies  | 6,000             | —        |
+| Search lockouts    | 500               | —        |
 
 ## Key Dependencies
 
