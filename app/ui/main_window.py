@@ -742,6 +742,17 @@ class MainWindow(QMainWindow):
             if reply != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
+        # Stop log panel polling immediately so no more serial calls are made
+        # while we're tearing down connections and threads below.
+        self._log_panel.pause_polling()
+
+        # If a connection attempt is still in progress, wait for it briefly.
+        try:
+            if self._connect_worker and self._connect_worker.isRunning():
+                self._connect_worker.wait(3000)
+        except RuntimeError:
+            pass  # already deleted via deleteLater
+
         for radio in self._radios:
             if radio.transcription_manager:
                 radio.transcription_manager.shutdown()

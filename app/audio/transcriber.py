@@ -338,13 +338,33 @@ class TranscriptionManager(QObject):
 
     def shutdown(self) -> None:
         """Stop all background threads cleanly."""
+        # Shut down the loky executor used internally by noisereduce / joblib
+        # to prevent leaked semaphore warnings at process exit.
+        try:
+            from joblib.externals.loky import get_reusable_executor
+            get_reusable_executor().shutdown(wait=False)
+        except Exception:
+            pass
+
         self._recorder.close()
+
         if self._worker:
             self._worker.stop()
-            self._worker.wait(3000)
+            # Allow up to 15 s for any in-progress Whisper job to finish.
+            # If it still hasn't stopped, terminate() it so the QThread is
+            # not destroyed while still running (causes abort on macOS).
+            if not self._worker.wait(15000):
+                log.warning("TranscriptionManager: worker did not stop in time — terminating")
+                self._worker.terminate()
+                self._worker.wait(2000)
             self._worker = None
+
         if self._loader:
-            self._loader.wait(3000)
+            # Model loader has no stop mechanism; wait up to 30 s then force-terminate.
+            if not self._loader.wait(30000):
+                log.warning("TranscriptionManager: model loader did not finish in time — terminating")
+                self._loader.terminate()
+                self._loader.wait(2000)
             self._loader = None
 
     # ------------------------------------------------------------------
