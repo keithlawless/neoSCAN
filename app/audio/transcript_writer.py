@@ -21,7 +21,7 @@ _DAY_HEADER_TEMPLATE = (
 )
 
 _ENTRY_TEMPLATE = (
-    "[{time}]  Channel: {channel}  Freq: {frequency}  Sys: {system}  Grp: {group}\n"
+    "[{time}]  Radio: {radio}  Channel: {channel}  Freq: {frequency}  Sys: {system}  Grp: {group}\n"
     "{text}\n\n"
 )
 
@@ -46,6 +46,7 @@ class TranscriptWriter:
         system: str,
         group: str,
         text: str,
+        radio: str = "",
     ) -> None:
         """Append one transcription entry to today's file. No-op if text is empty."""
         text = text.strip()
@@ -78,6 +79,7 @@ class TranscriptWriter:
                 f.write(
                     _ENTRY_TEMPLATE.format(
                         time=time_str,
+                        radio=radio or "(unknown)",
                         channel=channel or "(unknown)",
                         frequency=_fmt_freq(frequency),
                         system=system or "(unknown)",

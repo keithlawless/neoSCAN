@@ -75,6 +75,7 @@ class _TranscriptionJob:
     frequency: str
     system: str
     group: str
+    radio: str = ""
 
 
 class _ModelLoaderThread(QThread):
@@ -220,33 +221,37 @@ class TranscriptionManager(QObject):
 
     transcription_ready = pyqtSignal(int, str, object)
 
-    def __init__(self, parent=None) -> None:
+    def __init__(
+        self,
+        parent=None,
+        device_index: int | None = None,
+        radio_label: str = "",
+        enabled: bool = False,
+    ) -> None:
         super().__init__(parent)
         self._recorder = AudioRecorder()
         self._writer = TranscriptWriter()
         self._worker: Optional[TranscriberWorker] = None
         self._loader: Optional[_ModelLoaderThread] = None
         self._model = None
-        self._enabled = False
+        self._enabled = enabled
         self._current_model_size = ""
         self._current_language: Optional[str] = _DEFAULT_LANGUAGE
+        self._radio_label = radio_label
+        if device_index is not None:
+            self._recorder.set_device(device_index)
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def apply_settings(self) -> None:
-        """Read QSettings and (re)configure recorder, writer, and model."""
-        settings = load_prefs()
-        self._enabled = settings.value("transcription/enabled", False, type=bool)
+        """Read QSettings and (re)configure recorder, writer, and model.
 
-        device_index = settings.value("transcription/device_index", None)
-        if device_index is not None:
-            try:
-                device_index = int(device_index)
-            except (ValueError, TypeError):
-                device_index = None
-        self._recorder.set_device(device_index)
+        Note: _enabled and device_index are set at construction time (per-radio,
+        from the connection dialog) and are not read from QSettings here.
+        """
+        settings = load_prefs()
 
         pt_enabled = settings.value("transcription/passthrough_enabled", False, type=bool)
         out_device_index = settings.value("transcription/output_device_index", None)
@@ -273,6 +278,10 @@ class TranscriptionManager(QObject):
         if not self._enabled:
             # Keep model in memory if already loaded — just don't use it
             log.debug("TranscriptionManager: transcription disabled")
+
+    def set_transcript_writer(self, writer: TranscriptWriter) -> None:
+        """Inject a shared TranscriptWriter so multiple radios write to one file."""
+        self._writer = writer
 
     def recapture_noise_profile(self) -> None:
         """Discard the pass-through noise profile and capture a fresh one."""
@@ -307,6 +316,7 @@ class TranscriptionManager(QObject):
             frequency=entry.frequency,
             system=entry.system,
             group=entry.group,
+            radio=self._radio_label,
         )
         self._worker.enqueue(job)
 
@@ -319,6 +329,7 @@ class TranscriptionManager(QObject):
             system=job.system,
             group=job.group,
             text=text,
+            radio=job.radio,
         )
 
     def shutdown(self) -> None:
