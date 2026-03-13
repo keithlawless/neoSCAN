@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
 from app.data.models import (
     ScannerConfig, System, Group, Channel, TalkGroup, TrunkFrequency,
     SYSTEM_TYPE_NAMES, SYS_TYPE_CONVENTIONAL, SYS_TYPE_MOTOROLA,
+    SYS_TYPE_P25, SYS_TYPE_P25_EDACS,
 )
 from app.data.band_plan import is_frequency_valid
 import uuid
@@ -204,6 +205,15 @@ HELP = {
         "• HEX — shows TGID in hexadecimal (e.g. 1000)\n\n"
         "Match this to how TGIDs are listed in your reference source."
     ),
+    "p25_nac": (
+        "P25 NAC (Network Access Code)\n\n"
+        "Filters P25 traffic by Network Access Code (a 12-bit value, 0x000–0xFFF):\n"
+        "• SRCH — search mode: receive all transmissions and display the NAC found\n"
+        "• 0–4095 (decimal) — only open squelch for transmissions matching this NAC\n"
+        "• FFFF — receive all NACs without filtering\n\n"
+        "Use SRCH when setting up a new system; switch to the specific NAC once "
+        "you have identified it from the display."
+    ),
     "tgid": (
         "Talk Group ID (TGID)\n\n"
         "The numeric identifier for this talk group on the Motorola system. "
@@ -344,7 +354,7 @@ class ChannelEditorPanel(QWidget):
         self._context = ("group", s_idx, g_idx, None)
         sys_obj = config.systems[s_idx]
         grp = sys_obj.groups[g_idx]
-        if sys_obj.is_motorola and not grp.is_site:
+        if (sys_obj.is_motorola or sys_obj.is_p25) and not grp.is_site:
             self._build_tgid_group_form(grp, s_idx, g_idx)
         else:
             self._build_group_form(grp, s_idx, g_idx)
@@ -353,7 +363,7 @@ class ChannelEditorPanel(QWidget):
         self._config = config
         self._context = ("system", s_idx, None, None)
         sys = config.systems[s_idx]
-        if sys.is_motorola:
+        if sys.is_motorola or sys.is_p25:
             self._build_trunked_system_form(sys, s_idx)
         else:
             self._build_system_form(sys, s_idx)
@@ -584,9 +594,10 @@ class ChannelEditorPanel(QWidget):
         layout.addWidget(info)
 
     def _build_trunked_system_form(self, sys: System, s_idx: int) -> None:
-        """Form for a Motorola trunked system: parameters + trunk frequency table."""
+        """Form for a Motorola or P25 trunked system: parameters + trunk frequency table."""
         self._clear_form()
-        self._title.setText(f"System: {sys.name or '(unnamed)'}  [Motorola]")
+        type_label = sys.type_name
+        self._title.setText(f"System: {sys.name or '(unnamed)'}  [{type_label}]")
         layout = QVBoxLayout(self._form_container)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
@@ -598,7 +609,9 @@ class ChannelEditorPanel(QWidget):
         e_name.setMaxLength(16)
         e_name.setToolTip(HELP["sys_name"])
         e_name.textChanged.connect(lambda v: self._set_system_field(s_idx, "name", v))
-        e_name.textChanged.connect(lambda v: self._title.setText(f"System: {v or '(unnamed)'}  [Motorola]"))
+        e_name.textChanged.connect(
+            lambda v: self._title.setText(f"System: {v or '(unnamed)'}  [{type_label}]")
+        )
         form.addRow("System Name:", e_name)
         form.addRow("", _help_label("sys_name"))
 
@@ -636,55 +649,64 @@ class ChannelEditorPanel(QWidget):
         form.addRow("ID Search Mode:", c_id_search)
         form.addRow("", _help_label("mot_id_search"))
 
-        c_sbit = QComboBox()
-        c_sbit.addItem("Ignore", userData=False)
-        c_sbit.addItem("Yes", userData=True)
-        c_sbit.setCurrentIndex(1 if sys.ignore_status_bit else 0)
-        c_sbit.setToolTip(HELP["mot_status_bit"])
-        c_sbit.currentIndexChanged.connect(
-            lambda _: self._set_system_field(s_idx, "ignore_status_bit", c_sbit.currentData())
-        )
-        form.addRow("Status Bit:", c_sbit)
-        form.addRow("", _help_label("mot_status_bit"))
-
-        c_end = QComboBox()
-        c_end.addItem("Ignore", userData=False)
-        c_end.addItem("Analog", userData=True)
-        c_end.setCurrentIndex(1 if sys.end_code else 0)
-        c_end.setToolTip(HELP["mot_end_code"])
-        c_end.currentIndexChanged.connect(
-            lambda _: self._set_system_field(s_idx, "end_code", c_end.currentData())
-        )
-        form.addRow("End Code:", c_end)
-        form.addRow("", _help_label("mot_end_code"))
-
-        # Fleet map: preset numbers 1–16 or Custom
-        c_fmap = QComboBox()
-        for i in range(1, 17):
-            c_fmap.addItem(f"Preset {i}", userData=str(i))
-        c_fmap.addItem("Custom", userData="0")
-        fmap_idx = c_fmap.findData(sys.fleet_map or "16")
-        c_fmap.setCurrentIndex(fmap_idx if fmap_idx >= 0 else c_fmap.count() - 1)
-        c_fmap.setToolTip(HELP["mot_fleet_map"])
-
-        e_ctm_fmap = QLineEdit(sys.custom_fleet_map or "")
-        e_ctm_fmap.setPlaceholderText("8 hex digits (e.g. 00FFFFFF)")
-        e_ctm_fmap.setEnabled(sys.fleet_map == "0")
-        e_ctm_fmap.setToolTip(HELP["mot_custom_fleet_map"])
-        e_ctm_fmap.textChanged.connect(
-            lambda v: self._set_system_field(s_idx, "custom_fleet_map", v)
-        )
-
-        c_fmap.currentIndexChanged.connect(
-            lambda _: (
-                self._set_system_field(s_idx, "fleet_map", c_fmap.currentData()),
-                e_ctm_fmap.setEnabled(c_fmap.currentData() == "0"),
+        if sys.is_motorola:
+            c_sbit = QComboBox()
+            c_sbit.addItem("Ignore", userData=False)
+            c_sbit.addItem("Yes", userData=True)
+            c_sbit.setCurrentIndex(1 if sys.ignore_status_bit else 0)
+            c_sbit.setToolTip(HELP["mot_status_bit"])
+            c_sbit.currentIndexChanged.connect(
+                lambda _: self._set_system_field(s_idx, "ignore_status_bit", c_sbit.currentData())
             )
-        )
-        form.addRow("Fleet Map:", c_fmap)
-        form.addRow("", _help_label("mot_fleet_map"))
-        form.addRow("Custom Fleet Map:", e_ctm_fmap)
-        form.addRow("", _help_label("mot_custom_fleet_map"))
+            form.addRow("Status Bit:", c_sbit)
+            form.addRow("", _help_label("mot_status_bit"))
+
+            c_end = QComboBox()
+            c_end.addItem("Ignore", userData=False)
+            c_end.addItem("Analog", userData=True)
+            c_end.setCurrentIndex(1 if sys.end_code else 0)
+            c_end.setToolTip(HELP["mot_end_code"])
+            c_end.currentIndexChanged.connect(
+                lambda _: self._set_system_field(s_idx, "end_code", c_end.currentData())
+            )
+            form.addRow("End Code:", c_end)
+            form.addRow("", _help_label("mot_end_code"))
+
+            # Fleet map: preset numbers 1–16 or Custom
+            c_fmap = QComboBox()
+            for i in range(1, 17):
+                c_fmap.addItem(f"Preset {i}", userData=str(i))
+            c_fmap.addItem("Custom", userData="0")
+            fmap_idx = c_fmap.findData(sys.fleet_map or "16")
+            c_fmap.setCurrentIndex(fmap_idx if fmap_idx >= 0 else c_fmap.count() - 1)
+            c_fmap.setToolTip(HELP["mot_fleet_map"])
+
+            e_ctm_fmap = QLineEdit(sys.custom_fleet_map or "")
+            e_ctm_fmap.setPlaceholderText("8 hex digits (e.g. 00FFFFFF)")
+            e_ctm_fmap.setEnabled(sys.fleet_map == "0")
+            e_ctm_fmap.setToolTip(HELP["mot_custom_fleet_map"])
+            e_ctm_fmap.textChanged.connect(
+                lambda v: self._set_system_field(s_idx, "custom_fleet_map", v)
+            )
+
+            c_fmap.currentIndexChanged.connect(
+                lambda _: (
+                    self._set_system_field(s_idx, "fleet_map", c_fmap.currentData()),
+                    e_ctm_fmap.setEnabled(c_fmap.currentData() == "0"),
+                )
+            )
+            form.addRow("Fleet Map:", c_fmap)
+            form.addRow("", _help_label("mot_fleet_map"))
+            form.addRow("Custom Fleet Map:", e_ctm_fmap)
+            form.addRow("", _help_label("mot_custom_fleet_map"))
+
+        if sys.is_p25:
+            e_nac = QLineEdit(sys.p25_nac or "SRCH")
+            e_nac.setPlaceholderText("SRCH or 0–4095")
+            e_nac.setToolTip(HELP["p25_nac"])
+            e_nac.textChanged.connect(lambda v: self._set_system_field(s_idx, "p25_nac", v))
+            form.addRow("P25 NAC:", e_nac)
+            form.addRow("", _help_label("p25_nac"))
 
         c_mot_id = QComboBox()
         c_mot_id.addItem("Decimal", userData="0")
@@ -698,6 +720,19 @@ class ChannelEditorPanel(QWidget):
         form.addRow("ID Display:", c_mot_id)
         form.addRow("", _help_label("mot_id_display"))
 
+        c_rec = QComboBox()
+        c_rec.addItem("Off (no recording)", userData="0")
+        c_rec.addItem("Marked channels only", userData="1")
+        c_rec.addItem("All channels", userData="2")
+        cur_rec = c_rec.findData(sys.record_mode or "0")
+        c_rec.setCurrentIndex(cur_rec if cur_rec >= 0 else 0)
+        c_rec.setToolTip(HELP["sys_record_mode"])
+        c_rec.currentIndexChanged.connect(
+            lambda _: self._set_system_field(s_idx, "record_mode", c_rec.currentData())
+        )
+        form.addRow("Record Mode:", c_rec)
+        form.addRow("", _help_label("sys_record_mode"))
+
         cb_lockout = QCheckBox("Locked out (skip this system)")
         cb_lockout.setChecked(sys.lockout)
         cb_lockout.setToolTip(HELP["lockout"])
@@ -706,7 +741,9 @@ class ChannelEditorPanel(QWidget):
 
         layout.addWidget(params_box)
 
-        # ---- Trunk Frequencies table ----
+        # ---- Trunk Frequencies table (P25F has a single embedded frequency — no site) ----
+        if sys.is_p25f:
+            return
         tf_box = QGroupBox("Trunk Frequencies")
         tf_vbox = QVBoxLayout(tf_box)
 
@@ -969,7 +1006,7 @@ class ChannelEditorPanel(QWidget):
         form.addRow("System Name:", e_name)
         form.addRow("", _help_label("sys_name"))
 
-        IMPLEMENTED_SYSTEM_TYPES = {SYS_TYPE_CONVENTIONAL, SYS_TYPE_MOTOROLA}
+        IMPLEMENTED_SYSTEM_TYPES = {SYS_TYPE_CONVENTIONAL, SYS_TYPE_MOTOROLA, SYS_TYPE_P25, SYS_TYPE_P25_EDACS}
         c_type = QComboBox()
         for i, (type_id, type_name) in enumerate(SYSTEM_TYPE_NAMES.items()):
             c_type.addItem(type_name, userData=type_id)

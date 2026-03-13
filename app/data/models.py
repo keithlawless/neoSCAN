@@ -30,15 +30,19 @@ SYS_TYPE_LTR = 4
 SYS_TYPE_P25 = 5
 SYS_TYPE_EDACS_PV = 6
 SYS_TYPE_P25_EDACS = 7
+SYS_TYPE_TRBO = 8
+SYS_TYPE_DMR = 9
 
 SYSTEM_TYPE_NAMES = {
     SYS_TYPE_CONVENTIONAL: "Conventional",
     SYS_TYPE_MOTOROLA: "Motorola",
     SYS_TYPE_EDACS: "EDACS",
     SYS_TYPE_LTR: "LTR",
-    SYS_TYPE_P25: "P25",
+    SYS_TYPE_P25: "P25 Standard",
     SYS_TYPE_EDACS_PV: "EDACS ProVoice",
-    SYS_TYPE_P25_EDACS: "P25 (EDACS)",
+    SYS_TYPE_P25_EDACS: "P25 One-Freq Trunk",
+    SYS_TYPE_TRBO: "MotoTRBO",
+    SYS_TYPE_DMR: "DMR",
 }
 
 MAX_SYSTEMS = 700
@@ -238,6 +242,16 @@ class System:
         # Type 2 = Motorola Type I; Type 3 = Motorola Type II (also covers EDACS
         # in the .996 format — both share type 3 in FreeSCAN's model).
         return self.system_type in (SYS_TYPE_MOTOROLA, SYS_TYPE_EDACS)
+
+    @property
+    def is_p25(self) -> bool:
+        """P25 Standard (P25S) or P25 One-Frequency Trunk (P25F)."""
+        return self.system_type in (SYS_TYPE_P25, SYS_TYPE_P25_EDACS)
+
+    @property
+    def is_p25f(self) -> bool:
+        """P25 One-Frequency Trunk — no sites, just TGID groups."""
+        return self.system_type == SYS_TYPE_P25_EDACS
 
     @property
     def is_trunked(self) -> bool:
