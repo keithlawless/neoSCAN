@@ -301,7 +301,6 @@ class _DownloadWorker(QThread):
 
         self.log_line.emit(f"  TRN raw ({len(trn)} fields): {','.join(trn[:25])}")
         self.log_line.emit(f"  SIN field[13] (first site/group head): {first_site_field}")
-        self.log_line.emit(f"  TRN[20] (TGID_GRP_HEAD candidate): {trn[20] if len(trn) > 20 else '<missing>'}")
 
         # TRN GET response field indices (0-based, after command prefix stripped):
         # [0]=ID_SEARCH [1]=S_BIT [2]=END_CODE [3]=AFS [4-5]=RSV [6]=EMG [7]=EMGL
@@ -499,8 +498,6 @@ class _DownloadWorker(QThread):
             return 0
 
         self.log_line.emit(f"  TRN raw ({len(trn)} fields): {','.join(trn[:25])}")
-        self.log_line.emit(f"  TRN[19] (TGID_GRP_HEAD BCT15X-P25): {trn[19] if len(trn) > 19 else '<missing>'}")
-        self.log_line.emit(f"  TRN[20] (TGID_GRP_HEAD BCD996P2-P25 candidate): {trn[20] if len(trn) > 20 else '<missing>'}")
 
         def _f(fields: list[str], i: int) -> str:
             return fields[i].strip() if i < len(fields) else ""
@@ -508,10 +505,9 @@ class _DownloadWorker(QThread):
         # P25 TRN GET response (0-based, INDEX excluded):
         # [0]=ID_SEARCH [1]=S_BIT [2]=END_CODE [3]=AFS [4-5]=RSV
         # [6]=EMG [7]=EMGL [8]=FMAP [9]=CTM_FMAP [10-18]=RSV (9 fields)
-        # [19]=TGID_GRP_HEAD on BCT15X/BCD996XT (P25 has no DIG_END_CODE unlike Motorola)
-        # BCD996P2 P25: TGID_GRP_HEAD may be at [19] or [20]; check log to confirm
-        # [20]=TGID_GRP_TAIL [21-22]=ID_LOUT heads [23]=MOT_ID
-        # [24]=EMG_COLOR [25]=EMG_PATTERN [26]=RSV [27]=P25NAC [28]=PRI_ID_SCAN
+        # [19]=RSV [20]=TGID_GRP_HEAD [21]=TGID_GRP_TAIL [22-23]=ID_LOUT heads
+        # [24]=MOT_ID [25]=EMG_COLOR [26]=EMG_PATTERN [27]=P25NAC [28]=PRI_ID_SCAN
+        # Confirmed: BCD996P2 P25 and Motorola both use field[20] for TGID_GRP_HEAD.
         sys_obj.id_search = _f(trn, 0)
         sys_obj.p25_nac = _f(trn, 27) or "SRCH"
 
@@ -587,9 +583,9 @@ class _DownloadWorker(QThread):
                 site_idx = next_site_idx
 
         # --- TGID groups → talk groups ---
-        # P25 TGID_GRP_HEAD: field[19] (one earlier than BCT15X Motorola's [20])
+        # P25 TGID_GRP_HEAD: field[20] — confirmed same index as Motorola on all models.
         try:
-            tgid_grp_idx = int(_f(trn, 19))
+            tgid_grp_idx = int(_f(trn, 20))
         except ValueError:
             tgid_grp_idx = -1
 
