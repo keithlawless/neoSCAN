@@ -174,7 +174,7 @@ class CSVImportDialog(QDialog):
         self._column_combos = []
 
         for m in self._mappings:
-            col_widget = QWidget()
+            col_widget = QFrame()
             col_layout = QVBoxLayout(col_widget)
             col_layout.setSpacing(2)
             col_layout.setContentsMargins(4, 4, 4, 4)
