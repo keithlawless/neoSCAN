@@ -111,8 +111,10 @@ class CSVImportDialog(QDialog):
         mapping_layout.addWidget(mapping_hint)
 
         self._mapping_area = QScrollArea()
-        self._mapping_area.setWidgetResizable(True)
-        self._mapping_area.setMinimumHeight(120)
+        self._mapping_area.setWidgetResizable(False)
+        self._mapping_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._mapping_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._mapping_area.setFixedHeight(110)
         mapping_layout.addWidget(self._mapping_area)
         layout.addWidget(mapping_group)
 
