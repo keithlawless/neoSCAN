@@ -16,8 +16,9 @@ application. It runs on macOS, Windows, and Linux.
   with full TGID call-group download and upload
 - **.996 File Support** — open and save FreeSCAN `.996` files with full
   round-trip fidelity
-- **CSV Import** — import from any CSV file with intelligent header-based
-  field mapping (RadioReference exports, etc.)
+- **CSV Import** — import conventional channels, P25/Motorola talk groups,
+  and trunked sites from RadioReference CSV exports with automatic
+  header-based field mapping and mode/audio-type detection
 - **Upload to Scanner** — program the scanner over USB with a live progress log
 - **Download from Scanner** — read the current channel list from the scanner
   into the editor
@@ -69,6 +70,132 @@ pip install openai-whisper sounddevice noisereduce
 Transcription requires a supported audio input device (e.g. a USB sound card
 connected to the scanner's audio output). The Whisper model is downloaded
 automatically on first use.
+
+## CSV Import
+
+NeoSCAN can import channel lists and talk group lists from RadioReference CSV
+exports (and any CSV with compatible headers). There are two import paths
+depending on the type of data.
+
+### Conventional Channels — File > Import CSV…
+
+Use this for conventional channel lists (analog and digital).
+
+1. Open or create a configuration file with at least one conventional system
+   and group.
+2. Choose **File → Import CSV…**.
+3. Select your CSV file. NeoSCAN auto-maps columns based on header names.
+4. Adjust any incorrect mappings in the field-mapping row, then click **Import**.
+
+**RadioReference conventional export columns and their mappings:**
+
+| CSV Column | Maps To | Notes |
+|---|---|---|
+| Frequency Output | Frequency | RX frequency in MHz |
+| Alpha Tag | Channel Name | Scanner display label |
+| Mode | Modulation + Audio Type | `FMN`/`FM`/`AM` → modulation; `P25` → NFM + Digital Only |
+| Description | Comment | |
+| PL Output Tone | CTCSS/DCS Tone | |
+| Tag | Number Tag | Numeric only; non-numeric values become NONE |
+
+**Mode values recognised:**
+
+| Mode | Modulation set | Audio Type set |
+|---|---|---|
+| `FM` | FM | All |
+| `FMN` | NFM | All |
+| `AM` | AM | All |
+| `P25` | NFM | Digital Only |
+| `DMR` | NFM | Digital Only |
+
+---
+
+### P25 / Motorola Talk Groups — File > Import CSV…
+
+Use this for trunked system talk group lists. The target group must be inside
+a P25 or Motorola system — NeoSCAN detects the system type and creates
+`TalkGroup` objects instead of conventional channels.
+
+**Workflow:**
+
+1. Create a P25 or Motorola trunked system in the editor, then add a TGID group
+   inside it.
+2. Choose **File → Import CSV…**.
+3. Select the RadioReference talk group export CSV.
+4. In the **Import Into** dropdown, select the TGID group inside your trunked
+   system.
+5. Click **Import**.
+
+**RadioReference talk group export columns and their mappings:**
+
+| CSV Column | Maps To | Notes |
+|---|---|---|
+| Decimal | Talk Group ID | TGID number |
+| Alpha Tag | Channel Name | Scanner display label (up to 16 chars) |
+| Mode | Audio Type | `D`/`DE` → Digital Only; `A` → Analog Only; `D/A` → All |
+| Description | Comment | |
+| Tag | Number Tag | Numeric only |
+
+**Mode values recognised:**
+
+| Mode | Audio Type set |
+|---|---|
+| `D` | Digital Only |
+| `DE` (Encrypted) | Digital Only |
+| `A` | Analog Only |
+| `D/A` | All |
+
+---
+
+### P25 / Motorola Sites and Trunk Frequencies — File > Import Sites from CSV…
+
+Use this to populate a trunked system's sites and control/voice frequencies
+from a RadioReference site list export.
+
+**Workflow:**
+
+1. Create a P25 or Motorola trunked system in the editor (it does not need
+   any groups yet).
+2. Choose **File → Import Sites from CSV…**.
+3. Select the RadioReference sites export CSV.
+4. In the **Import Into System** dropdown, select your trunked system.
+5. Review the site preview table, then click **Import Sites**.
+
+Each row in the CSV becomes a **Site group** in the system. All frequencies
+listed for that site become **trunk frequencies** with auto-assigned LCNs.
+Frequencies marked with a trailing `c` in the CSV (control channels) are
+imported identically — the control-channel marker is stripped.
+
+**Supported CSV layouts:**
+
+| Column | Full export | Compact export |
+|---|---|---|
+| RFSS | ✓ | — (omitted) |
+| Site Dec | ✓ | ✓ |
+| Site Hex | ✓ | ✓ |
+| Site NAC | ✓ | — (omitted) |
+| Description | ✓ | ✓ |
+| County Name | ✓ | ✓ |
+| Lat / Lon | ✓ | ✓ |
+| Range | ✓ | ✓ |
+| Frequencies… | ✓ | ✓ |
+
+Columns are identified by header name, so missing optional columns (RFSS,
+Site NAC) do not shift the frequency data.
+
+---
+
+### Full P25 / Motorola System Import Workflow
+
+To build a complete trunked system from RadioReference exports:
+
+1. In the channel editor, create a new P25 or Motorola system.
+2. Add a TGID group inside the system (for talk groups).
+3. **File → Import Sites from CSV…** — select the sites CSV. This creates
+   site groups and populates all trunk frequencies.
+4. **File → Import CSV…** — select the talk groups CSV and target the TGID
+   group created in step 2.
+5. Save the configuration (**File → Save**) and upload to the scanner.
 
 ## Development Setup
 
@@ -175,7 +302,8 @@ neo-scan/
       editor/
         systems_panel.py           Tree view panel (Systems > Groups > Channels)
         channel_editor.py          Channel/group/system detail editor form
-        csv_import_dialog.py       CSV import wizard dialog
+        csv_import_dialog.py       CSV import wizard (channels and talk groups)
+        trunk_site_import_dialog.py  Trunk site / frequency import wizard
       programmer/
         upload_dialog.py           Upload-to-scanner dialog with progress log
         download_dialog.py         Download-from-scanner dialog with progress log
