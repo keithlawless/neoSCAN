@@ -25,8 +25,8 @@ FIELD_DEFS: dict[str, list[str]] = {
     "tgid":         ["tgid", "decimal", "talk group", "talkgroup", "tg id", "tg"],
     "frequency":    ["frequency", "freq", "mhz", "frequency (mhz)", "output", "output freq",
                      "rx freq", "receive freq", "rx", "receive"],
-    "modulation":   ["modulation", "mod", "modmode"],
-    "audio_type":   ["mode", "audio type", "audio"],
+    "modulation":   ["modulation", "mod", "modmode", "mode"],
+    "audio_type":   ["audio type", "audio"],
     "tone":         ["tone", "ctcss", "dcs", "pl", "squelch tone", "ctcss/dcs",
                      "tone code", "pl tone", "rx tone"],
     "lockout":      ["lockout", "locked", "lo", "skip", "avoid"],
@@ -201,8 +201,11 @@ def _apply_field(
                 except ValueError:
                     ch.frequency = v
         elif field == "modulation":
+            mod, audio = _classify_mode(value)
             if hasattr(ch, "modulation"):
-                ch.modulation = _normalise_mod(value)
+                ch.modulation = mod
+            if audio is not None and hasattr(ch, "audio_type"):
+                ch.audio_type = audio
         elif field == "tone":
             if hasattr(ch, "tone"):
                 ch.tone = value
@@ -255,13 +258,50 @@ def _normalise_audio_type(value: str) -> str:
     return "0"  # default: All
 
 
-def _normalise_mod(value: str) -> str:
-    """Normalise a modulation string to the scanner's expected values."""
+def _classify_mode(value: str) -> tuple[str, str | None]:
+    """
+    Classify a RadioReference 'Mode' column value into (modulation, audio_type).
+
+    RadioReference uses 'Mode' for two purposes:
+      Trunked talk group exports:    D / DE / A / D/A  (audio filter codes)
+      Conventional channel exports:  FMN / FM / P25 / AM  (modulation codes)
+
+    Returns (modulation_string, audio_type_or_None).
+    audio_type is None when the value does not imply a particular filter.
+    """
     v = value.strip().upper()
-    mapping = {
-        "FM": "FM", "NFM": "NFM", "AM": "AM", "WFM": "WFM",
-        "FMB": "FMB", "AUTO": "AUTO",
-        "NBFM": "NFM", "NARROW FM": "NFM", "NARROW": "NFM",
-        "WIDE FM": "WFM", "BROADCAST": "WFM",
+
+    # RadioReference audio type codes (trunked talk group exports)
+    rr_audio: dict[str, tuple[str, str]] = {
+        "D":   ("AUTO", "2"),   # Digital
+        "DE":  ("AUTO", "2"),   # Digital Encrypted
+        "A":   ("AUTO", "1"),   # Analog
+        "D/A": ("AUTO", "0"),   # Both
+        "DA":  ("AUTO", "0"),
     }
-    return mapping.get(v, "AUTO")
+    if v in rr_audio:
+        return rr_audio[v]
+
+    # RadioReference / standard modulation codes (conventional channel exports)
+    # P25 and similar digital modes also imply audio_type = Digital Only.
+    rr_mod: dict[str, tuple[str, str | None]] = {
+        "FM":    ("FM",   None),
+        "NFM":   ("NFM",  None),
+        "FMN":   ("NFM",  None),   # FMN = Narrowband FM (RadioReference)
+        "AM":    ("AM",   None),
+        "WFM":   ("WFM",  None),
+        "FMB":   ("FMB",  None),
+        "AUTO":  ("AUTO", None),
+        "NBFM":  ("NFM",  None),
+        "NARROW FM": ("NFM", None),
+        "WIDE FM":   ("WFM", None),
+        "P25":   ("NFM",  "2"),    # P25 digital — NFM carrier, Digital Only
+        "P25N":  ("NFM",  "2"),
+        "P25D":  ("NFM",  "2"),
+        "TDMA":  ("NFM",  "2"),
+        "DMR":   ("NFM",  "2"),
+    }
+    if v in rr_mod:
+        return rr_mod[v]
+
+    return ("AUTO", None)
