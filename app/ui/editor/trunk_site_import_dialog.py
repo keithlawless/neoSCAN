@@ -62,28 +62,67 @@ def _parse_sites_csv(path: str) -> tuple[list[str], list[_SiteRow]]:
     """
     Parse a RadioReference sites CSV.
     Returns (headers, site_rows).
-    Frequencies are collected from column 9 onward (variable width).
+
+    Supports both RadioReference export variants:
+      Full:    RFSS, Site Dec, Site Hex, Site NAC, Description, County Name,
+               Lat, Lon, Range, Frequencies...
+      Compact: Site Dec, Site Hex, Description, County Name,
+               Lat, Lon, Range, Frequencies...
+
+    Column positions are resolved by header name so either layout works.
+    Frequencies are every column from the "Frequencies" header onward.
     """
     rows: list[_SiteRow] = []
     with open(path, newline="", encoding="utf-8-sig", errors="replace") as f:
         reader = csv.reader(f)
         headers = next(reader, [])
+
+        # Map normalised header name → column index
+        h_idx: dict[str, int] = {h.strip().lower(): i for i, h in enumerate(headers)}
+
+        def _cidx(name: str) -> int:
+            """Return column index for header name, or -1 if absent."""
+            return h_idx.get(name.lower(), -1)
+
+        rfss_col        = _cidx("rfss")
+        site_dec_col    = _cidx("site dec")
+        site_hex_col    = _cidx("site hex")
+        site_nac_col    = _cidx("site nac")
+        desc_col        = _cidx("description")
+        county_col      = _cidx("county name")
+        lat_col         = _cidx("lat")
+        lon_col         = _cidx("lon")
+        freq_start_col  = _cidx("frequencies")   # first freq column
+
+        if freq_start_col == -1:
+            # Fall back: frequencies start after the last known fixed column
+            freq_start_col = max(
+                rfss_col, site_dec_col, site_hex_col, site_nac_col,
+                desc_col, county_col, lat_col, lon_col,
+                _cidx("range"),
+            ) + 1
+
+        def _col(row: list[str], idx: int) -> str:
+            return row[idx].strip() if 0 <= idx < len(row) else ""
+
         for row in reader:
             if not any(cell.strip() for cell in row):
                 continue
-            def _col(i: int) -> str:
-                return row[i].strip() if i < len(row) else ""
-            freqs = [row[i].strip() for i in range(9, len(row)) if i < len(row) and row[i].strip()]
+            freqs = [
+                row[i].strip()
+                for i in range(freq_start_col, len(row))
+                if row[i].strip()
+            ]
             rows.append(_SiteRow(
-                rfss=_col(0),
-                site_dec=_col(1),
-                site_hex=_col(2),
-                site_nac=_col(3),
-                description=_col(4),
-                county=_col(5),
-                lat=_col(6),
-                lon=_col(7),
-                frequencies=freqs,
+                rfss        = _col(row, rfss_col),
+                site_dec    = _col(row, site_dec_col),
+                site_hex    = _col(row, site_hex_col),
+                site_nac    = _col(row, site_nac_col),
+                description = _col(row, desc_col),
+                county      = _col(row, county_col),
+                lat         = _col(row, lat_col),
+                lon         = _col(row, lon_col),
+                frequencies = freqs,
             ))
     return headers, rows
 
@@ -91,7 +130,7 @@ def _parse_sites_csv(path: str) -> tuple[list[str], list[_SiteRow]]:
 def is_sites_csv(headers: list[str]) -> bool:
     """Return True if the headers look like a RadioReference sites CSV."""
     h_lower = {h.strip().lower() for h in headers}
-    return "rfss" in h_lower or ("site dec" in h_lower and "frequencies" in h_lower)
+    return "site dec" in h_lower and "frequencies" in h_lower
 
 
 # ---------------------------------------------------------------------------
