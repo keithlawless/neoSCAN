@@ -344,13 +344,17 @@ class _UploadWorker(QThread):
                         altl = ch.alert_level or "0"
                         ch_name = "".join(c for c in (ch.name or "").strip() if c in _safe)[:16].strip()
                         record = 1 if ch.output == "ON" else 0
+                        audio_type = ch.audio_type if ch.audio_type in ("0", "1", "2") else "0"
+                        number_tag = ch.number_tag if ch.number_tag else "NONE"
+                        vol_offset = ch.volume_offset if ch.volume_offset else "0"
                         try:
                             proto.send_command(
                                 f"CIN,{ch_index},{ch_name},{freq_fmt},{mod},"
                                 f"{tone},{1 if ch.tone_lockout else 0},"
                                 f"{1 if ch.lockout else 0},{1 if ch.priority else 0},"
                                 f"{1 if ch.attenuator else 0},{alt},{altl},"
-                                f"{record},0,0,NONE,OFF,0,0"  # RECORD,AUDIO_TYPE,P25NAC,NUMBER_TAG,ALT_COLOR,ALT_PATTERN,VOL_OFFSET
+                                f"{record},{audio_type},SRCH,{number_tag},OFF,0,{vol_offset}"
+                                # RECORD,AUDIO_TYPE,P25NAC,NUMBER_TAG,ALT_COLOR,ALT_PATTERN,VOL_OFFSET
                             )
                             self.log_line.emit(
                                 f"    {ch_name}  {freq_raw:.4f} MHz  {mod}"

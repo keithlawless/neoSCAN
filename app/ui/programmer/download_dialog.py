@@ -199,6 +199,9 @@ class _DownloadWorker(QThread):
                         ch_alert_lvl = _para(cin, 9)
                         next_chan_index_str = _para(cin, 11)   # FWD_INDEX
                         ch_record = _para(cin, 14)             # RECORD (after 4 index fields)
+                        ch_audio_type = _para(cin, 15)         # AUDIO_TYPE (0=All,1=Analog,2=Digital)
+                        ch_number_tag = _para(cin, 17) or "NONE"  # NUMBER_TAG
+                        ch_vol_offset = _para(cin, 20) or "0"  # VOL_OFFSET
 
                         try:
                             freq_mhz = float(ch_freq_raw) / 10000.0
@@ -218,6 +221,9 @@ class _DownloadWorker(QThread):
                         ch_obj.alert_tone = ch_alert
                         ch_obj.alert_level = ch_alert_lvl
                         ch_obj.output = "ON" if ch_record == "1" else "OFF"
+                        ch_obj.audio_type = ch_audio_type if ch_audio_type in ("0", "1", "2") else "0"
+                        ch_obj.number_tag = ch_number_tag
+                        ch_obj.volume_offset = ch_vol_offset
                         ch_obj.group_id = grp_obj.group_id
                         grp_obj.channels.append(ch_obj)
 

@@ -110,6 +110,15 @@ HELP = {
         "setting. Range: -3 to +3. Use positive values for quiet channels, "
         "negative for loud ones."
     ),
+    "audio_type": (
+        "Audio Type\n\n"
+        "Filters which type of audio the scanner will stop on for this channel:\n"
+        "• All — stop on both analog and digital transmissions\n"
+        "• Analog Only — ignore digital (P25/DMR) signals\n"
+        "• Digital Only — ignore analog FM signals\n\n"
+        "Use 'Digital Only' for P25 or DMR channels to avoid stopping on "
+        "analog interference."
+    ),
     "output": (
         "Record Output\n\n"
         "When checked, this channel's audio is routed to the scanner's "
@@ -462,6 +471,18 @@ class ChannelEditorPanel(QWidget):
         )
         form.addRow("Modulation:", c_mod)
         form.addRow("", _help_label("modulation"))
+
+        # Audio type
+        c_audio = QComboBox()
+        for val, label in [("0", "All"), ("1", "Analog Only"), ("2", "Digital Only")]:
+            c_audio.addItem(label, userData=val)
+        c_audio.setCurrentIndex(c_audio.findData(ch.audio_type if ch.audio_type in ("0", "1", "2") else "0"))
+        c_audio.setToolTip(HELP["audio_type"])
+        c_audio.currentIndexChanged.connect(
+            lambda _: self._set_channel_field(s_idx, g_idx, c_idx, "audio_type", c_audio.currentData())
+        )
+        form.addRow("Audio Type:", c_audio)
+        form.addRow("", _help_label("audio_type"))
 
         # Tone
         e_tone = QLineEdit(ch.tone)
