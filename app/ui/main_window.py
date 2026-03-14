@@ -30,6 +30,7 @@ from app.ui.settings.preferences_dialog import PreferencesDialog, load_prefs, ap
 from app.ui.editor.systems_panel import SystemsPanel
 from app.ui.editor.channel_editor import ChannelEditorPanel
 from app.ui.editor.csv_import_dialog import CSVImportDialog
+from app.ui.editor.trunk_site_import_dialog import TrunkSiteImportDialog
 from app.ui.remote_control.control_panel import ControlPanel
 from app.ui.remote_control.log_panel import LogPanel
 from app.audio.transcriber import TranscriptionManager
@@ -144,10 +145,18 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
 
         self._import_csv_action = QAction("Import &CSV…", self)
-        self._import_csv_action.setStatusTip("Import channels from a CSV file")
+        self._import_csv_action.setStatusTip("Import channels or talk groups from a CSV file")
         self._import_csv_action.triggered.connect(self._on_import_csv)
         self._import_csv_action.setEnabled(False)
         file_menu.addAction(self._import_csv_action)
+
+        self._import_sites_action = QAction("Import &Sites from CSV…", self)
+        self._import_sites_action.setStatusTip(
+            "Import P25/Motorola trunk sites and frequencies from a RadioReference CSV"
+        )
+        self._import_sites_action.triggered.connect(self._on_import_sites_csv)
+        self._import_sites_action.setEnabled(False)
+        file_menu.addAction(self._import_sites_action)
 
         file_menu.addSeparator()
 
@@ -315,6 +324,7 @@ class MainWindow(QMainWindow):
         self._save_action.setEnabled(has_config)
         self._save_as_action.setEnabled(has_config)
         self._import_csv_action.setEnabled(has_config)
+        self._import_sites_action.setEnabled(has_config)
         self._upload_action.setEnabled(connected and has_config)
 
     def _update_file_status(self) -> None:
@@ -480,6 +490,15 @@ class MainWindow(QMainWindow):
         if not self._config:
             return
         dlg = CSVImportDialog(self._config, parent=self)
+        if dlg.exec():
+            self._systems_panel.load_config(self._config)
+            self._update_title()
+            self._update_file_status()
+
+    def _on_import_sites_csv(self) -> None:
+        if not self._config:
+            return
+        dlg = TrunkSiteImportDialog(self._config, parent=self)
         if dlg.exec():
             self._systems_panel.load_config(self._config)
             self._update_title()
