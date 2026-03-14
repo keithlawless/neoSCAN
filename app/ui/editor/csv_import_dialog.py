@@ -37,8 +37,10 @@ FIELD_OPTIONS = [file_csv.SKIP] + sorted(file_csv.IMPORTABLE_FIELDS)
 FIELD_LABELS = {
     file_csv.SKIP: "(skip)",
     "name": "Channel Name",
+    "tgid": "Talk Group ID",
     "frequency": "Frequency (MHz)",
     "modulation": "Modulation",
+    "audio_type": "Audio Type (D/A/D/A)",
     "tone": "CTCSS/DCS Tone",
     "lockout": "Lockout",
     "priority": "Priority",
@@ -216,7 +218,9 @@ class CSVImportDialog(QDialog):
             return
 
         s_idx, g_idx = target_data
-        target_group = self._config.systems[s_idx].groups[g_idx]
+        target_sys = self._config.systems[s_idx]
+        target_group = target_sys.groups[g_idx]
+        create_talkgroups = target_sys.is_trunked
 
         # Build final mappings from combos
         final_mappings = []
@@ -227,13 +231,17 @@ class CSVImportDialog(QDialog):
             )
 
         try:
-            added, warnings = file_csv.import_csv(self._path, final_mappings, target_group)
+            added, warnings = file_csv.import_csv(
+                self._path, final_mappings, target_group,
+                create_talkgroups=create_talkgroups,
+            )
         except Exception as exc:
             QMessageBox.critical(self, "Import Failed", f"Import error:\n{exc}")
             return
 
         self._config.modified = True
-        msg = f"Imported {added} channel(s) into '{target_group.name}'."
+        label = "talk group(s)" if create_talkgroups else "channel(s)"
+        msg = f"Imported {added} {label} into '{target_group.name}'."
         if warnings:
             msg += f"\n\nWarnings ({len(warnings)}):\n" + "\n".join(warnings[:10])
         QMessageBox.information(self, "Import Complete", msg)

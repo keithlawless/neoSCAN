@@ -11,7 +11,7 @@ import logging
 from difflib import SequenceMatcher
 from typing import NamedTuple
 
-from app.data.models import Channel, Group, System, ScannerConfig, SYS_TYPE_CONVENTIONAL
+from app.data.models import Channel, Group, System, ScannerConfig, SYS_TYPE_CONVENTIONAL, TalkGroup
 
 log = logging.getLogger(__name__)
 
@@ -21,10 +21,12 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 FIELD_DEFS: dict[str, list[str]] = {
-    "name":         ["name", "channel", "channel name", "chan", "description", "desc", "label"],
+    "name":         ["name", "channel", "channel name", "chan", "alpha tag", "label"],
+    "tgid":         ["tgid", "decimal", "talk group", "talkgroup", "tg id", "tg"],
     "frequency":    ["frequency", "freq", "mhz", "frequency (mhz)", "output", "output freq",
                      "rx freq", "receive freq", "rx", "receive"],
-    "modulation":   ["mode", "modulation", "mod", "modmode", "type"],
+    "modulation":   ["modulation", "mod", "modmode"],
+    "audio_type":   ["mode", "audio type", "audio"],
     "tone":         ["tone", "ctcss", "dcs", "pl", "squelch tone", "ctcss/dcs",
                      "tone code", "pl tone", "rx tone"],
     "lockout":      ["lockout", "locked", "lo", "skip", "avoid"],
@@ -106,11 +108,16 @@ def import_csv(
     path: str,
     mappings: list[FieldMapping],
     target_group: Group,
+    create_talkgroups: bool = False,
 ) -> tuple[int, list[str]]:
     """
-    Import channels from a CSV file into target_group using the given mappings.
+    Import channels or talk groups from a CSV file into target_group.
 
-    Returns (channels_added, list_of_warnings).
+    When create_talkgroups=True (trunked system group), creates TalkGroup
+    objects instead of Channel objects — frequency validation is skipped and
+    the tgid field is used instead.
+
+    Returns (items_added, list_of_warnings).
     """
     added = 0
     warnings: list[str] = []
@@ -125,9 +132,13 @@ def import_csv(
         for row_num, row in enumerate(reader, start=2):
             if not any(cell.strip() for cell in row):
                 continue  # skip blank rows
-            ch = Channel()
+
+            if create_talkgroups:
+                ch: Channel | TalkGroup = TalkGroup()
+            else:
+                ch = Channel()
+                ch.modulation = "AUTO"
             ch.group_id = target_group.group_id
-            ch.modulation = "AUTO"
 
             for col_idx, field_name in field_map.items():
                 if col_idx >= len(row):
@@ -137,69 +148,111 @@ def import_csv(
                     continue
                 _apply_field(ch, field_name, raw, row_num, warnings)
 
-            if not ch.name and not ch.frequency:
-                continue  # skip meaningless rows
-
             # Truncate name to 16 chars
             ch.name = ch.name[:16]
 
-            # Validate frequency is numeric
-            if ch.frequency:
-                try:
-                    float(ch.frequency)
-                except ValueError:
-                    warnings.append(
-                        f"Row {row_num}: '{ch.frequency}' is not a valid frequency — skipped"
-                    )
-                    continue
+            if create_talkgroups:
+                if not ch.name and not getattr(ch, "tgid", ""):
+                    continue  # skip meaningless rows
+            else:
+                if not ch.name and not ch.frequency:
+                    continue  # skip meaningless rows
+                # Validate frequency is numeric
+                if ch.frequency:
+                    try:
+                        float(ch.frequency)
+                    except ValueError:
+                        warnings.append(
+                            f"Row {row_num}: '{ch.frequency}' is not a valid frequency — skipped"
+                        )
+                        continue
 
             target_group.channels.append(ch)
             added += 1
 
-    log.info("CSV import: added %d channels to group %r", added, target_group.name)
+    label = "talk groups" if create_talkgroups else "channels"
+    log.info("CSV import: added %d %s to group %r", added, label, target_group.name)
     return added, warnings
 
 
 def _apply_field(
-    ch: Channel, field: str, value: str, row_num: int, warnings: list[str]
+    ch: "Channel | TalkGroup", field: str, value: str, row_num: int, warnings: list[str]
 ) -> None:
-    """Apply a raw CSV cell value to the appropriate Channel attribute."""
+    """Apply a raw CSV cell value to the appropriate Channel/TalkGroup attribute."""
     try:
         if field == "name":
             ch.name = value
+        elif field == "tgid":
+            if hasattr(ch, "tgid"):
+                ch.tgid = value.strip()
+        elif field == "audio_type":
+            if hasattr(ch, "audio_type"):
+                ch.audio_type = _normalise_audio_type(value)
         elif field == "frequency":
-            # Normalize: strip MHz suffix, handle kHz
-            v = value.upper().replace("MHZ", "").replace("KHZ", "").strip()
-            # If value looks like kHz (e.g. 154235), convert to MHz
-            try:
-                fval = float(v)
-                if fval > 30000:  # definitely kHz
-                    fval /= 1000.0
-                ch.frequency = f"{fval:.4f}"
-            except ValueError:
-                ch.frequency = v
+            if hasattr(ch, "frequency"):
+                # Normalize: strip MHz suffix, handle kHz
+                v = value.upper().replace("MHZ", "").replace("KHZ", "").strip()
+                # If value looks like kHz (e.g. 154235), convert to MHz
+                try:
+                    fval = float(v)
+                    if fval > 30000:  # definitely kHz
+                        fval /= 1000.0
+                    ch.frequency = f"{fval:.4f}"
+                except ValueError:
+                    ch.frequency = v
         elif field == "modulation":
-            ch.modulation = _normalise_mod(value)
+            if hasattr(ch, "modulation"):
+                ch.modulation = _normalise_mod(value)
         elif field == "tone":
-            ch.tone = value
+            if hasattr(ch, "tone"):
+                ch.tone = value
         elif field == "lockout":
             ch.lockout = value.lower() in ("1", "true", "yes", "y", "locked", "lo")
         elif field == "priority":
             ch.priority = value.lower() in ("1", "true", "yes", "y")
         elif field == "attenuator":
-            ch.attenuator = value.lower() in ("1", "true", "yes", "y", "on")
+            if hasattr(ch, "attenuator"):
+                ch.attenuator = value.lower() in ("1", "true", "yes", "y", "on")
         elif field == "delay":
-            ch.delay = value
+            if hasattr(ch, "delay"):
+                ch.delay = value
         elif field == "comment":
-            ch.comment = value
+            if hasattr(ch, "comment"):
+                ch.comment = value
         elif field == "number_tag":
             ch.number_tag = value if value.isdigit() else "NONE"
         elif field == "tone_lockout":
-            ch.tone_lockout = value.lower() in ("1", "true", "yes", "y")
+            if hasattr(ch, "tone_lockout"):
+                ch.tone_lockout = value.lower() in ("1", "true", "yes", "y")
         elif field == "volume_offset":
             ch.volume_offset = value
     except Exception as exc:
         warnings.append(f"Row {row_num}: error mapping {field!r}: {exc}")
+
+
+def _normalise_audio_type(value: str) -> str:
+    """
+    Map a mode/audio-type string to a scanner AUDIO_TYPE code.
+
+    RadioReference mode codes:
+      D / DE  → Digital Only (2)
+      A       → Analog Only (1)
+      D/A     → All (0)
+    Scanner codes 0/1/2 are passed through unchanged.
+    """
+    v = value.strip().upper()
+    rr_map = {
+        "D":   "2",   # Digital
+        "DE":  "2",   # Digital Encrypted
+        "A":   "1",   # Analog
+        "D/A": "0",   # Both
+        "DA":  "0",
+    }
+    if v in rr_map:
+        return rr_map[v]
+    if v in ("0", "1", "2"):
+        return v
+    return "0"  # default: All
 
 
 def _normalise_mod(value: str) -> str:
