@@ -255,7 +255,7 @@ class MainWindow(QMainWindow):
 
         # Left side: one tab per connected radio (ControlPanel per tab)
         self._radio_tabs = QTabWidget()
-        self._radio_tabs.setMaximumWidth(280)
+        self._radio_tabs.setMaximumWidth(340)
 
         self._log_panel = LogPanel()
         self._log_panel.channel_info_updated.connect(self._on_channel_info_updated)

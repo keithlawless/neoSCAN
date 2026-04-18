@@ -8,7 +8,7 @@ application. It runs on macOS, Windows, and Linux.
 
 ## Features
 
-- **Multi-Radio Support** — connect up to two scanners simultaneously, each
+- **Multi-Radio Support** — connect up to three scanners simultaneously, each
   with its own tab, channel list, and remote control panel
 - **Channel Editor** — full tree view of Systems → Groups → Channels with
   inline editing and contextual help for every field
@@ -23,7 +23,7 @@ application. It runs on macOS, Windows, and Linux.
 - **Download from Scanner** — read the current channel list from the scanner
   into the editor
 - **Remote Control** — virtual keypad to control the scanner from your
-  computer, with a merged live transmission log across both radios
+  computer, with a merged live transmission log across all connected radios
 - **Audio Transcription** — optional Whisper-based speech-to-text for each
   radio; transcripts appear inline in the transmission log and are saved to a
   text file

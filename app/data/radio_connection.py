@@ -14,7 +14,7 @@ from app.data.models import ScannerConfig
 
 @dataclass
 class RadioConnection:
-    label: str                              # "Radio 1", "Radio 2", …
+    label: str                              # "Radio 1", "Radio 2", "Radio 3"
     port_name: str
     conn: serial.Serial
     proto: ScannerProtocol
