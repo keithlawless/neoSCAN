@@ -107,6 +107,21 @@ class ConnectionSettingsDialog(QDialog):
         audio_device_row.addWidget(audio_refresh_btn)
         audio_form.addRow(self._audio_device_label, audio_device_row)
 
+        # If transcription is globally disabled in preferences, hide the
+        # per-radio transcription controls — they would be no-ops.
+        global_tx_enabled = load_prefs().value("transcription/enabled", True, type=bool)
+        if not global_tx_enabled:
+            self._transcribe_check.setChecked(False)
+            self._transcribe_check.setVisible(False)
+            self._audio_device_label.setVisible(False)
+            self._audio_combo.setVisible(False)
+            audio_refresh_btn.setVisible(False)
+            disabled_note = QLabel(
+                "Transcription is disabled in Preferences → Transcription."
+            )
+            disabled_note.setStyleSheet("color: gray; font-size: 11px;")
+            audio_form.addRow("", disabled_note)
+
         if _SD_AVAILABLE:
             self._populate_audio_devices()
         else:

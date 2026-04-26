@@ -11,7 +11,6 @@ dependencies = [
     "PyQt6>=6.6.0",
     "pyserial>=3.5",
     "sounddevice>=0.4.6",
-    "openai-whisper>=20231117",
     "numpy>=1.24",
     "scipy>=1.10",
     "noisereduce>=3.0",
@@ -21,6 +20,9 @@ dependencies = [
 dev = [
     "pytest>=7.0",
     "pytest-qt>=4.0",
+]
+whisper = [
+    "openai-whisper>=20231117",
 ]
 
 [project.scripts]

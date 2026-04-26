@@ -9,8 +9,10 @@ _ModelLoaderThread    — QThread that loads the Whisper model in the background
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -30,6 +32,13 @@ from app.audio.transcript_writer import TranscriptWriter
 from app.ui.settings.preferences_dialog import load_prefs
 
 log = logging.getLogger(__name__)
+
+try:
+    import whisper as _whisper_probe  # noqa: F401  (probe import only)
+    WHISPER_AVAILABLE = True
+    del _whisper_probe
+except ImportError:
+    WHISPER_AVAILABLE = False
 
 _DEFAULT_MODEL = "base"
 _DEFAULT_LANGUAGE = DEFAULT_LANGUAGE
@@ -234,7 +243,11 @@ class TranscriptionManager(QObject):
         self._worker: Optional[TranscriberWorker] = None
         self._loader: Optional[_ModelLoaderThread] = None
         self._model = None
-        self._enabled = enabled
+        # _per_radio_enabled comes from the connection dialog; _enabled is the
+        # effective state after factoring in the global toggle and whether
+        # Whisper is actually importable. apply_settings() recomputes _enabled.
+        self._per_radio_enabled = enabled
+        self._enabled = enabled and WHISPER_AVAILABLE
         self._current_model_size = ""
         self._current_language: Optional[str] = _DEFAULT_LANGUAGE
         self._radio_label = radio_label
@@ -248,8 +261,8 @@ class TranscriptionManager(QObject):
     def apply_settings(self) -> None:
         """Read QSettings and (re)configure recorder, writer, and model.
 
-        Note: _enabled and device_index are set at construction time (per-radio,
-        from the connection dialog) and are not read from QSettings here.
+        device_index is set at construction time and is not read here.
+        Effective _enabled is recomputed each call from per-radio + global flags.
         """
         settings = load_prefs()
 
@@ -271,13 +284,21 @@ class TranscriptionManager(QObject):
             if self._worker is not None:
                 self._worker.set_language(language)
 
+        global_enabled = settings.value("transcription/enabled", True, type=bool)
+        self._enabled = self._per_radio_enabled and global_enabled and WHISPER_AVAILABLE
+
         model_size = settings.value("transcription/model_size", _DEFAULT_MODEL)
         if self._enabled and model_size != self._current_model_size:
             self._load_model(model_size)
 
         if not self._enabled:
             # Keep model in memory if already loaded — just don't use it
-            log.debug("TranscriptionManager: transcription disabled")
+            if not WHISPER_AVAILABLE:
+                log.debug("TranscriptionManager: openai-whisper not installed")
+            elif not global_enabled:
+                log.debug("TranscriptionManager: globally disabled in preferences")
+            else:
+                log.debug("TranscriptionManager: per-radio transcription disabled")
 
     def set_transcript_writer(self, writer: TranscriptWriter) -> None:
         """Inject a shared TranscriptWriter so multiple radios write to one file."""
@@ -308,6 +329,7 @@ class TranscriptionManager(QObject):
             log.debug("TranscriptionManager: no audio captured for row %d", row_index)
             self.transcription_ready.emit(row_index, "", None)
             return
+        self._maybe_save_audio(audio, entry)
         if self._worker is None or self._model is None:
             log.warning("TranscriptionManager: model not ready — dropping job for row %d",
                         row_index)
@@ -323,6 +345,28 @@ class TranscriptionManager(QObject):
             radio=self._radio_label,
         )
         self._worker.enqueue(job)
+
+    def _maybe_save_audio(self, audio, entry) -> None:
+        """Save the audio clip to disk if the retain-audio preference is enabled."""
+        settings = load_prefs()
+        if not settings.value("transcription/retain_audio", False, type=bool):
+            return
+        save_dir = settings.value("transcription/audio_save_dir", "").strip()
+        if not save_dir:
+            save_dir = str(Path.home() / "Documents" / "NeoSCAN" / "Recordings")
+        try:
+            out_dir = Path(save_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            radio_name = re.sub(r"[^\w\-]", "_", self._radio_label or "radio")
+            timestamp = entry.start_time.strftime("%Y%m%d-%H%M%S")
+            filename = out_dir / f"{radio_name}-{timestamp}.wav"
+            import numpy as np
+            from scipy.io import wavfile
+            pcm = (audio * 32767).clip(-32768, 32767).astype(np.int16)
+            wavfile.write(str(filename), 16000, pcm)
+            log.info("TranscriptionManager: saved audio to %s", filename)
+        except Exception as exc:
+            log.warning("TranscriptionManager: failed to save audio — %s", exc)
 
     def on_transcription_done(self, row_index: int, text: str, job: _TranscriptionJob) -> None:
         """Called by LogPanel after it has updated the table row."""

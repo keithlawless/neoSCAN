@@ -26,7 +26,9 @@ application. It runs on macOS, Windows, and Linux.
   computer, with a merged live transmission log across all connected radios
 - **Audio Transcription** — optional Whisper-based speech-to-text for each
   radio; transcripts appear inline in the transmission log and are saved to a
-  text file
+  daily text file
+- **Daily AI Summaries** — optional Anthropic Claude integration that turns
+  each day's transcript into a nicely formatted HTML report at midnight
 - **Transmission Log Export** — save the session log to CSV
 
 ## Requirements
@@ -46,30 +48,54 @@ python3 -m venv .venv
 source .venv/bin/activate       # macOS / Linux
 # .venv\Scripts\activate        # Windows
 
-# Install dependencies
+# Install the core app (no on-device transcription)
 pip install -e .
+
+# Or install with on-device transcription (downloads ~1 GB of PyTorch + Whisper)
+pip install -e ".[whisper]"
 
 # Run the app
 python main.py
 ```
 
-## Optional Dependencies
+## Optional Features
 
-| Package        | Purpose                                              |
-|----------------|------------------------------------------------------|
-| `openai-whisper` | Audio transcription (speech-to-text)               |
-| `sounddevice`  | Audio recording for transcription                    |
-| `noisereduce`  | Stationary noise reduction before transcription      |
+### On-device transcription (Whisper)
 
-Install all optional features at once:
+Whisper is now an optional extra. Install it only if you want NeoSCAN to
+transcribe scanner audio locally:
 
 ```bash
-pip install openai-whisper sounddevice noisereduce
+pip install -e ".[whisper]"
 ```
 
-Transcription requires a supported audio input device (e.g. a USB sound card
-connected to the scanner's audio output). The Whisper model is downloaded
-automatically on first use.
+If `openai-whisper` isn't installed, NeoSCAN starts normally and the
+**Preferences → Transcription** tab shows a banner explaining how to enable
+it. You can still use the Daily AI Summary feature against transcript files
+produced on another machine.
+
+Transcription also requires a supported audio input device (e.g. a USB sound
+card connected to the scanner's audio output). The Whisper model is
+downloaded automatically on first use.
+
+### Daily AI Summaries (Anthropic Claude)
+
+NeoSCAN can optionally turn each day's transcript into a self-contained HTML
+report by sending the text to Anthropic's Claude API. To enable this:
+
+1. Open **File → Preferences → Transcription**.
+2. In the *Daily Summary* section, tick **Generate a daily HTML summary with
+   Claude**.
+3. Paste your Anthropic API key (it is stored locally in QSettings).
+4. Choose a Claude model (Opus 4.7, Sonnet 4.6, or Haiku 4.5).
+5. Pick a folder for the reports (defaults to
+   `~/Documents/NeoSCAN/Summaries`).
+
+Reports are written as `YYYY-MM-DD.html` files. NeoSCAN runs the summary at
+midnight while it is open, and on next launch automatically generates reports
+for any past day that has a transcript but no report yet.
+
+No new Python dependency is required — the API call uses the standard library.
 
 ## CSV Import
 
@@ -297,6 +323,8 @@ neo-scan/
       recorder.py                  Audio capture via sounddevice
       transcriber.py               Whisper transcription manager and worker thread
       transcript_writer.py         Transcript file writer
+      summary_generator.py         Anthropic API client + HTML report renderer
+      summary_scheduler.py         Midnight QTimer + catch-up scan for daily summaries
     ui/
       main_window.py               Main application window (multi-radio tabs)
       editor/
@@ -312,7 +340,7 @@ neo-scan/
         log_panel.py               Multi-radio transmission logger with CSV export
       settings/
         settings_dialog.py         Connection dialog (port, audio device, transcription)
-        preferences_dialog.py      App preferences (theme, Whisper model, transcript path)
+        preferences_dialog.py      Tabbed app preferences: General / Logging / Audio / Transcription
   resources/
     icons/                         SVG source + PNG icons at multiple sizes
   tools/

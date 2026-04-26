@@ -35,6 +35,7 @@ from app.ui.remote_control.control_panel import ControlPanel
 from app.ui.remote_control.log_panel import LogPanel
 from app.audio.transcriber import TranscriptionManager
 from app.audio.transcript_writer import TranscriptWriter
+from app.audio.summary_scheduler import SummaryScheduler
 from app.data import file_996
 from app.data.models import ScannerConfig, Channel
 from app.data.radio_connection import RadioConnection
@@ -90,6 +91,16 @@ class MainWindow(QMainWindow):
         self._build_status_bar()
         self._update_connection_ui()
         self._update_title()
+
+        # Daily summary scheduler — fires at next midnight, and we also kick
+        # off a catch-up pass shortly after launch so any missed days from
+        # while the app was closed get a report.
+        self._summary_scheduler = SummaryScheduler(parent=self)
+        self._summary_scheduler.summary_ready.connect(self._on_summary_ready)
+        self._summary_scheduler.summary_failed.connect(self._on_summary_failed)
+        self._summary_scheduler.batch_finished.connect(self._on_summary_batch_finished)
+        self._summary_warned_this_batch = False
+        QTimer.singleShot(2000, self._summary_scheduler.trigger_catch_up)
 
         # Auto-connect if the user has enabled it in preferences.
         settings = load_prefs()
@@ -733,6 +744,35 @@ class MainWindow(QMainWindow):
             for radio in self._radios:
                 if radio.transcription_manager:
                     radio.transcription_manager.apply_settings()
+            # The user may have just enabled summaries or fixed a bad API key;
+            # reset the per-batch warning flag and re-run catch-up so any
+            # outstanding days get picked up.
+            self._summary_warned_this_batch = False
+            self._summary_scheduler.trigger_catch_up()
+
+    def _on_summary_ready(self, path) -> None:
+        self.statusBar().showMessage(f"Daily summary saved to {Path(path).name}", 5000)
+
+    def _on_summary_failed(self, date, error: str) -> None:
+        log.warning("Daily summary failed for %s: %s", date, error)
+        self.statusBar().showMessage(
+            f"Daily summary failed for {date.isoformat()}", 5000,
+        )
+        # Show the user one popup per worker batch so a bad API key during
+        # catch-up doesn't fire N message boxes in a row.
+        if not self._summary_warned_this_batch:
+            self._summary_warned_this_batch = True
+            QMessageBox.warning(
+                self, "Daily Summary Failed",
+                f"Could not generate the summary for {date.isoformat()}:\n\n{error}\n\n"
+                "Check your Anthropic API key and network connection in "
+                "Preferences → Transcription.",
+            )
+
+    def _on_summary_batch_finished(self) -> None:
+        # Re-arm the per-batch warning flag so the next batch's first
+        # failure (if any) gets a fresh popup.
+        self._summary_warned_this_batch = False
 
     def _on_about(self) -> None:
         from pathlib import Path
@@ -776,4 +816,8 @@ class MainWindow(QMainWindow):
             if radio.transcription_manager:
                 radio.transcription_manager.shutdown()
             port_manager.close_port(radio.conn)
+
+        if hasattr(self, "_summary_scheduler"):
+            self._summary_scheduler.shutdown()
+
         super().closeEvent(event)
