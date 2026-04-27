@@ -102,11 +102,12 @@ class SummaryScheduler(QObject):
 
     def shutdown(self) -> None:
         self._timer.stop()
-        if self._worker and self._worker.isRunning():
+        if self._worker_is_alive():
             if not self._worker.wait(5000):
                 log.warning("SummaryScheduler: worker did not stop in time — terminating")
                 self._worker.terminate()
                 self._worker.wait(2000)
+        self._worker = None
 
     # ------------------------------------------------------------------
     # Internal
@@ -166,18 +167,40 @@ class SummaryScheduler(QObject):
                 out.append(d)
         return sorted(out)
 
+    def _worker_is_alive(self) -> bool:
+        """True iff self._worker still references a live QThread.
+
+        Once a previous worker has emitted finished and been deleteLater'd,
+        the underlying C++ object is gone — touching .isRunning() on the
+        Python wrapper raises RuntimeError. Treat that as "not alive".
+        """
+        if self._worker is None:
+            return False
+        try:
+            return self._worker.isRunning()
+        except RuntimeError:
+            self._worker = None
+            return False
+
     def _spawn(
         self,
         generator: SummaryGenerator,
         dates: list[_dt.date],
         transcript_dir: str,
     ) -> None:
-        if self._worker is not None and self._worker.isRunning():
+        if self._worker_is_alive():
             log.info("SummaryScheduler: worker already running — skipping spawn")
             return
-        self._worker = _SummaryWorker(generator, dates, transcript_dir, parent=self)
-        self._worker.finished_one.connect(self.summary_ready.emit)
-        self._worker.failed_one.connect(self.summary_failed.emit)
-        self._worker.finished.connect(self.batch_finished.emit)
-        self._worker.finished.connect(self._worker.deleteLater)
-        self._worker.start()
+        worker = _SummaryWorker(generator, dates, transcript_dir, parent=self)
+        worker.finished_one.connect(self.summary_ready.emit)
+        worker.failed_one.connect(self.summary_failed.emit)
+        worker.finished.connect(self.batch_finished.emit)
+        # Drop our reference before deleteLater runs so a subsequent _spawn
+        # doesn't dereference a destroyed C++ object.
+        worker.finished.connect(self._on_worker_finished)
+        worker.finished.connect(worker.deleteLater)
+        self._worker = worker
+        worker.start()
+
+    def _on_worker_finished(self) -> None:
+        self._worker = None
