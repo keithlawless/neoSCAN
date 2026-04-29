@@ -48,13 +48,17 @@ Structure:
 1. <h2>Overview</h2> — 3-5 sentences summarizing the day's radio activity \
 (volume, prevailing systems, general tone).
 2. <h2>Northborough</h2> — events occurring in Northborough, Massachusetts. \
-Include any traffic on Northborough police, fire, EMS, or DPW channels, plus \
-any mention of Northborough by name, Northborough street names or landmarks \
-(e.g. Main St, West Main St, Church St, Hudson St, Whitney St, Bartlett Pond, \
-Assabet Reservoir), or units known to belong to Northborough. Use <ul><li> \
-for individual events with approximate time. If no Northborough activity is \
-identifiable in the transcript, write a single <p> stating "No Northborough \
-activity identified." Do not omit this section.
+In the transcripts Northborough is almost always written as the abbreviation \
+"Northboro" — specifically "Northboro PD" (police), "Northboro FD" (fire / \
+EMS), and "Northboro DPW" (public works). Treat any line tagged with one of \
+those labels, or any mention of "Northboro" / "Northborough" by name, as \
+Northborough activity. Also pull in entries that reference Northborough \
+street names or landmarks (e.g. Main St, West Main St, Church St, Hudson St, \
+Whitney St, Bartlett Pond, Assabet Reservoir) or units known to belong to \
+Northborough. Use <ul><li> for individual events with approximate time and \
+a brief description. If no Northborough activity is identifiable in the \
+transcript, write a single <p> stating "No Northborough activity \
+identified." Do not omit this section.
 3. <h2>Notable Events</h2> — concrete incidents from elsewhere, grouped by \
 topic/system using <h3> subheadings. Inside each subsection use <ul><li> for \
 individual events. Quote brief snippets where they add clarity. Omit this \
