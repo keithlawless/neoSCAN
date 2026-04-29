@@ -47,14 +47,23 @@ inside a <main> element.
 Structure:
 1. <h2>Overview</h2> — 3-5 sentences summarizing the day's radio activity \
 (volume, prevailing systems, general tone).
-2. <h2>Notable Events</h2> — group concrete incidents by topic/system using \
-<h3> subheadings. Inside each subsection use <ul><li> for individual events. \
-Quote brief snippets where they add clarity. Omit this section if nothing \
-notable.
-3. <h2>Flagged Keywords</h2> — if the transcript mentions medical emergencies, \
+2. <h2>Northborough</h2> — events occurring in Northborough, Massachusetts. \
+Include any traffic on Northborough police, fire, EMS, or DPW channels, plus \
+any mention of Northborough by name, Northborough street names or landmarks \
+(e.g. Main St, West Main St, Church St, Hudson St, Whitney St, Bartlett Pond, \
+Assabet Reservoir), or units known to belong to Northborough. Use <ul><li> \
+for individual events with approximate time. If no Northborough activity is \
+identifiable in the transcript, write a single <p> stating "No Northborough \
+activity identified." Do not omit this section.
+3. <h2>Notable Events</h2> — concrete incidents from elsewhere, grouped by \
+topic/system using <h3> subheadings. Inside each subsection use <ul><li> for \
+individual events. Quote brief snippets where they add clarity. Omit this \
+section if nothing notable.
+4. <h2>Flagged Keywords</h2> — if the transcript mentions medical emergencies, \
 structure fires, vehicle pursuits, shots fired, MVAs, code 3 responses, \
-hazmat, or similar high-priority terms, list them as <ul><li> items with the \
-approximate time. Omit this section entirely if none.
+hazmat, or similar high-priority terms (anywhere, including Northborough), \
+list them as <ul><li> items with the approximate time. Omit this section \
+entirely if none.
 
 Be concise. Avoid filler like "the radio mentioned" or "operators discussed". \
 Lead with concrete content. If the transcript is empty or unintelligible, \
