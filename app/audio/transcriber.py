@@ -43,7 +43,7 @@ except ImportError:
 _DEFAULT_MODEL = "base"
 _DEFAULT_LANGUAGE = DEFAULT_LANGUAGE
 _MAX_QUEUE_DEPTH = 10   # drop new jobs rather than let memory and latency grow unbounded
-_MAX_AUDIO_SECS = 60    # truncate clips longer than this before VAD and Whisper
+_MAX_AUDIO_SECS = 60    # cap the *speech-only* audio sent to Whisper at this many seconds
 
 # silero-vad parameters. The defaults here are conservative for scanner
 # traffic: short utterances (a few words) are common, so we keep
@@ -202,11 +202,6 @@ class TranscriberWorker(QThread):
 
     def _process(self, job: _TranscriptionJob) -> None:
         raw = job.audio
-        max_samples = int(_MAX_AUDIO_SECS * SAMPLE_RATE)
-        if len(raw) > max_samples:
-            log.debug("TranscriberWorker: truncating %.1fs clip to %ds for row %d",
-                      len(raw) / SAMPLE_RATE, _MAX_AUDIO_SECS, job.row_index)
-            raw = raw[:max_samples]
         duration = len(raw) / SAMPLE_RATE
         peak = float(np.max(np.abs(raw)))
         try:
@@ -225,6 +220,10 @@ class TranscriberWorker(QThread):
             # Voice activity detection: drop the dead air before Whisper sees
             # it. Whisper hallucinates aggressively on silence/static, so this
             # is the single biggest lever against false transcriptions.
+            #
+            # Run VAD on the *full* clip — truncating first would throw away
+            # speech that happens to fall after the cap when the start of the
+            # clip is mostly squelch tail.
             if self._vad_model is not None:
                 speech = _extract_speech(normalized, self._vad_model)
                 if speech is None:
@@ -239,6 +238,16 @@ class TranscriberWorker(QThread):
                     100.0 * speech_secs / max(duration, 0.001),
                 )
                 normalized = speech
+
+            # Cap the (now speech-only) audio at _MAX_AUDIO_SECS so Whisper
+            # decoding latency stays bounded and the worker queue can drain.
+            max_samples = int(_MAX_AUDIO_SECS * SAMPLE_RATE)
+            if len(normalized) > max_samples:
+                log.debug(
+                    "TranscriberWorker: truncating %.1fs of speech to %ds for row %d",
+                    len(normalized) / SAMPLE_RATE, _MAX_AUDIO_SECS, job.row_index,
+                )
+                normalized = normalized[:max_samples]
 
             # Pad with 1 s of silence so Whisper flushes the final segment.
             # Without this, audio that ends abruptly (squelch closing mid-word)
