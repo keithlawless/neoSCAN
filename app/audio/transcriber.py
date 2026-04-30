@@ -43,36 +43,52 @@ except ImportError:
 _DEFAULT_MODEL = "base"
 _DEFAULT_LANGUAGE = DEFAULT_LANGUAGE
 _MAX_QUEUE_DEPTH = 10   # drop new jobs rather than let memory and latency grow unbounded
-_MAX_AUDIO_SECS = 60    # truncate clips longer than this before noise reduction and Whisper
+_MAX_AUDIO_SECS = 60    # truncate clips longer than this before VAD and Whisper
+
+# silero-vad parameters. The defaults here are conservative for scanner
+# traffic: short utterances (a few words) are common, so we keep
+# min_speech_duration_ms low. speech_pad_ms keeps a little context around
+# each chunk so Whisper doesn't lose word onsets/offsets.
+_VAD_THRESHOLD = 0.5
+_VAD_MIN_SPEECH_MS = 250
+_VAD_MIN_SILENCE_MS = 100
+_VAD_SPEECH_PAD_MS = 150
 
 
-def _reduce_noise(audio: np.ndarray) -> np.ndarray:
+def _extract_speech(
+    audio: np.ndarray,
+    vad_model,
+) -> Optional[np.ndarray]:
     """
-    Apply stationary noise reduction using noisereduce.
-
-    Uses the whole clip to estimate the noise profile (stationary=True),
-    which works well for the consistent background hiss / squelch static
-    present in scanner audio.  prop_decrease=0.75 leaves a little residual
-    noise so Whisper is not confused by over-processed silence.
-
-    Falls back to the original audio if noisereduce is not installed or
-    raises an unexpected error.
+    Run silero-vad over `audio` and return only the speech portions
+    concatenated, or None if no speech was detected. On any error, returns
+    the original audio so the pipeline degrades gracefully.
     """
     try:
-        import noisereduce as nr  # deferred — optional dependency
-        reduced = nr.reduce_noise(
-            y=audio,
-            sr=SAMPLE_RATE,
-            stationary=True,
-            prop_decrease=0.75,
-        )
-        return reduced.astype(np.float32)
+        import torch
+        from silero_vad import get_speech_timestamps  # deferred
     except ImportError:
-        log.debug("noisereduce not installed — skipping noise reduction")
         return audio
+
+    try:
+        wav = torch.from_numpy(audio.astype(np.float32))
+        timestamps = get_speech_timestamps(
+            wav,
+            vad_model,
+            sampling_rate=SAMPLE_RATE,
+            threshold=_VAD_THRESHOLD,
+            min_speech_duration_ms=_VAD_MIN_SPEECH_MS,
+            min_silence_duration_ms=_VAD_MIN_SILENCE_MS,
+            speech_pad_ms=_VAD_SPEECH_PAD_MS,
+        )
     except Exception as exc:
-        log.warning("Noise reduction failed — using raw audio: %s", exc)
+        log.warning("VAD failed — using raw audio: %s", exc)
         return audio
+
+    if not timestamps:
+        return None
+    chunks = [audio[t["start"]:t["end"]] for t in timestamps]
+    return np.concatenate(chunks).astype(np.float32)
 
 
 @dataclass
@@ -88,7 +104,9 @@ class _TranscriptionJob:
 
 
 class _ModelLoaderThread(QThread):
-    model_loaded = pyqtSignal(object)
+    """Loads Whisper and (optionally) silero-vad in the background."""
+
+    model_loaded = pyqtSignal(object, object)  # whisper_model, vad_model_or_None
     load_failed = pyqtSignal(str)
 
     def __init__(self, model_size: str, parent=None) -> None:
@@ -99,9 +117,21 @@ class _ModelLoaderThread(QThread):
         try:
             import whisper  # deferred — optional dependency
             log.info("Loading Whisper model '%s'…", self._model_size)
-            model = whisper.load_model(self._model_size)
+            whisper_model = whisper.load_model(self._model_size)
             log.info("Whisper model '%s' loaded", self._model_size)
-            self.model_loaded.emit(model)
+
+            vad_model = None
+            try:
+                from silero_vad import load_silero_vad  # deferred — optional
+                log.info("Loading silero-vad model…")
+                vad_model = load_silero_vad()
+                log.info("silero-vad model loaded")
+            except ImportError:
+                log.info("silero-vad not installed — VAD will be skipped")
+            except Exception as exc:
+                log.warning("Failed to load silero-vad — VAD will be skipped: %s", exc)
+
+            self.model_loaded.emit(whisper_model, vad_model)
         except Exception as exc:
             log.error("Failed to load Whisper model: %s", exc)
             self.load_failed.emit(str(exc))
@@ -117,9 +147,16 @@ class TranscriberWorker(QThread):
 
     transcription_ready = pyqtSignal(int, str, object)
 
-    def __init__(self, model, language: Optional[str] = _DEFAULT_LANGUAGE, parent=None) -> None:
+    def __init__(
+        self,
+        model,
+        vad_model=None,
+        language: Optional[str] = _DEFAULT_LANGUAGE,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._model = model
+        self._vad_model = vad_model
         self._language: Optional[str] = language
         self._queue: list[_TranscriptionJob] = []
         self._mutex = QMutex()
@@ -181,15 +218,33 @@ class TranscriberWorker(QThread):
                     "check input device gain and cable connection",
                     job.row_index, peak,
                 )
-            # Normalize to a consistent peak level so Whisper's VAD always
-            # sees adequate signal regardless of input gain or system type.
+            # Normalize peak so Whisper's internal VAD always sees adequate
+            # signal regardless of input gain or system type.
             normalized = raw / peak if peak > 0.0 else raw
+
+            # Voice activity detection: drop the dead air before Whisper sees
+            # it. Whisper hallucinates aggressively on silence/static, so this
+            # is the single biggest lever against false transcriptions.
+            if self._vad_model is not None:
+                speech = _extract_speech(normalized, self._vad_model)
+                if speech is None:
+                    log.info("Transcription row %d: VAD found no speech, skipping",
+                             job.row_index)
+                    self.transcription_ready.emit(job.row_index, "", job)
+                    return
+                speech_secs = len(speech) / SAMPLE_RATE
+                log.debug(
+                    "  row %d: VAD kept %.2fs of %.2fs (%.0f%%)",
+                    job.row_index, speech_secs, duration,
+                    100.0 * speech_secs / max(duration, 0.001),
+                )
+                normalized = speech
+
             # Pad with 1 s of silence so Whisper flushes the final segment.
             # Without this, audio that ends abruptly (squelch closing mid-word)
             # is often dropped from the last incomplete segment.
-            padded = np.concatenate([normalized,
-                                     np.zeros(SAMPLE_RATE, dtype=np.float32)])
-            audio = _reduce_noise(padded)
+            audio = np.concatenate([normalized,
+                                    np.zeros(SAMPLE_RATE, dtype=np.float32)])
             result = self._model.transcribe(
                 audio,
                 fp16=False,
@@ -382,14 +437,6 @@ class TranscriptionManager(QObject):
 
     def shutdown(self) -> None:
         """Stop all background threads cleanly."""
-        # Shut down the loky executor used internally by noisereduce / joblib
-        # to prevent leaked semaphore warnings at process exit.
-        try:
-            from joblib.externals.loky import get_reusable_executor
-            get_reusable_executor().shutdown(wait=False)
-        except Exception:
-            pass
-
         self._recorder.close()
 
         if self._worker:
@@ -433,16 +480,24 @@ class TranscriptionManager(QObject):
         self._loader.finished.connect(self._loader.deleteLater)
         self._loader.start()
 
-    def _on_model_loaded(self, model) -> None:
+    def _on_model_loaded(self, model, vad_model) -> None:
         self._model = model
         self._loader = None
-        self._worker = TranscriberWorker(model, language=self._current_language, parent=self)
+        self._worker = TranscriberWorker(
+            model,
+            vad_model=vad_model,
+            language=self._current_language,
+            parent=self,
+        )
         # Use an explicit slot (not signal-to-signal) so Qt's auto-connection
         # correctly marshals the call to the main thread via a queued connection.
         self._worker.transcription_ready.connect(self._on_worker_transcription_ready)
         self._worker.start()
-        log.info("TranscriptionManager: worker started with model '%s'",
-                 self._current_model_size)
+        log.info(
+            "TranscriptionManager: worker started with Whisper '%s'%s",
+            self._current_model_size,
+            " + silero-vad" if vad_model is not None else " (no VAD)",
+        )
 
     @pyqtSlot(int, str, object)
     def _on_worker_transcription_ready(self, row_index: int, text: str, job) -> None:

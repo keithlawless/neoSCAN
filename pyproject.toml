@@ -13,7 +13,6 @@ dependencies = [
     "sounddevice>=0.4.6",
     "numpy>=1.24",
     "scipy>=1.10",
-    "noisereduce>=3.0",
 ]
 
 [project.optional-dependencies]
@@ -23,6 +22,7 @@ dev = [
 ]
 whisper = [
     "openai-whisper>=20231117",
+    "silero-vad>=5.0",
 ]
 
 [project.scripts]
