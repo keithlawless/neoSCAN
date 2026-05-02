@@ -20,13 +20,23 @@ ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_MODEL = "claude-sonnet-4-6"
 DEFAULT_REPORT_DIR = str(Path.home() / "Documents" / "NeoSCAN" / "Summaries")
 MAX_TOKENS = 4096
+HOUR_MAX_TOKENS = 1500
 HTTP_TIMEOUT_SEC = 120
+
+# Transcripts smaller than this go to a single API call with the original
+# prompt; anything larger is map-reduced (per-hour summaries → final HTML).
+# 80K chars is roughly ~20K tokens, comfortably under any model's context
+# window even with the prompt scaffolding factored in.
+SINGLE_SHOT_CHAR_LIMIT = 80_000
 
 AVAILABLE_MODELS = [
     ("Claude Opus 4.7",   "claude-opus-4-7"),
     ("Claude Sonnet 4.6", "claude-sonnet-4-6"),
     ("Claude Haiku 4.5",  "claude-haiku-4-5-20251001"),
 ]
+
+# Each transcript entry from TranscriptWriter starts with a [HH:MM:SS] header.
+_ENTRY_RE = re.compile(r"^\[(\d{2}):(\d{2}):(\d{2})\]", re.MULTILINE)
 
 _PROMPT_TEMPLATE = """\
 You are summarizing a full day of two-way radio transmissions captured by a \
@@ -72,6 +82,84 @@ entirely if none.
 Be concise. Avoid filler like "the radio mentioned" or "operators discussed". \
 Lead with concrete content. If the transcript is empty or unintelligible, \
 return only a single <p> stating that.
+"""
+
+
+_HOUR_PROMPT_TEMPLATE = """\
+You are condensing one hour of two-way radio transmissions captured by a \
+police/fire/EMS scanner. The transcript was produced by automatic speech \
+recognition on short, often noisy audio clips, so individual entries may be \
+garbled or fragmentary.
+
+Date: {date}
+Hour: {hour:02d}:00 - {hour:02d}:59
+
+Note on labels: Northborough traffic is tagged "Northboro PD" (police), \
+"Northboro FD" (fire / EMS), or "Northboro DPW" (public works). Treat any \
+of those tags, or any mention of "Northboro" / "Northborough" by name, or \
+Northborough street names (e.g. Main St, West Main St, Church St, Hudson \
+St, Whitney St, Bartlett Pond, Assabet Reservoir), as Northborough \
+activity.
+
+Transcript:
+{transcript}
+
+Produce a compact plain-text summary of just this hour, formatted exactly \
+as follows. Use approximate times in HH:MM. Lead with concrete content. Be \
+terse — one short line per item. Omit any section that has no content (do \
+not write "none" or "n/a"; just leave it out).
+
+ACTIVITY: <one short sentence describing the volume and character of this hour>
+
+INCIDENTS:
+- HH:MM <brief description of a specific incident> [optional: agency / system tag]
+
+NORTHBOROUGH:
+- HH:MM <Northborough event with brief description>
+
+FLAGGED:
+- HH:MM <high-priority keyword>: <brief description>
+(only include for medical emergencies, structure fires, vehicle pursuits, \
+shots fired, MVAs, code 3 responses, hazmat, or similar high-priority terms)
+"""
+
+
+_REDUCE_PROMPT_TEMPLATE = """\
+You are producing the final daily HTML summary report for a day of two-way \
+radio transmissions captured by a police/fire/EMS scanner. The raw \
+transcript was too long to summarize in one pass, so it has been condensed \
+into per-hour structured summaries by an earlier step.
+
+Date: {date}
+
+Per-hour summaries (chronological):
+{hour_summaries}
+
+Synthesize these into a single coherent daily summary. Merge related events \
+that span multiple hours, drop duplicates, and group by topic / system. The \
+HH:MM timestamps are approximate and come from the original transcript.
+
+Produce an HTML summary suitable for a daily report. Use only these tags: \
+h2, h3, p, ul, li, strong, em. Do NOT include <html>, <body>, <head>, \
+<style>, <script>, or code fences — return only the inner content that will \
+be placed inside a <main> element.
+
+Structure:
+1. <h2>Overview</h2> — 3-5 sentences summarizing the day's radio activity \
+(volume, prevailing systems, general tone).
+2. <h2>Northborough</h2> — events occurring in Northborough, Massachusetts. \
+Use <ul><li> for individual events with approximate time and a brief \
+description. If none of the per-hour summaries contain Northborough \
+activity, write a single <p> stating "No Northborough activity \
+identified." Do not omit this section.
+3. <h2>Notable Events</h2> — concrete incidents from elsewhere, grouped by \
+topic / system using <h3> subheadings. Inside each subsection use <ul><li> \
+for individual events. Omit this section if nothing notable.
+4. <h2>Flagged Keywords</h2> — list flagged high-priority items as <ul><li> \
+items with their approximate time. Omit this section entirely if none of \
+the per-hour summaries flagged anything.
+
+Be concise. Lead with concrete content.
 """
 
 
@@ -185,12 +273,20 @@ class SummaryGenerator:
         if not transcript_text:
             raise SummaryError(f"Transcript is empty: {tx_path}")
 
-        prompt = _PROMPT_TEMPLATE.format(
-            date=date.isoformat(),
-            transcript=transcript_text,
-        )
-
-        body_html = self._call_anthropic(prompt)
+        # Small transcripts go in one shot; bigger ones are map-reduced over
+        # hour buckets so we don't blow past the 200K-token context limit.
+        if len(transcript_text) <= SINGLE_SHOT_CHAR_LIMIT:
+            log.info(
+                "SummaryGenerator: single-shot for %s (%d chars)",
+                date, len(transcript_text),
+            )
+            body_html = self._summarize_single_shot(date, transcript_text)
+        else:
+            log.info(
+                "SummaryGenerator: map-reduce for %s (%d chars)",
+                date, len(transcript_text),
+            )
+            body_html = self._summarize_map_reduce(date, transcript_text)
 
         self.report_dir.mkdir(parents=True, exist_ok=True)
         out_path = self.report_path(date)
@@ -209,13 +305,76 @@ class SummaryGenerator:
         return out_path
 
     # ------------------------------------------------------------------
+    # Summarization strategies
+    # ------------------------------------------------------------------
+
+    def _summarize_single_shot(self, date: _dt.date, transcript_text: str) -> str:
+        prompt = _PROMPT_TEMPLATE.format(
+            date=date.isoformat(),
+            transcript=transcript_text,
+        )
+        return self._call_anthropic(prompt, max_tokens=MAX_TOKENS)
+
+    def _summarize_map_reduce(self, date: _dt.date, transcript_text: str) -> str:
+        entries = _parse_entries(transcript_text)
+        if not entries:
+            # No timestamped entries detected — the file is probably hand-edited
+            # or in an unexpected format. Fall back to a truncated single-shot.
+            log.warning(
+                "SummaryGenerator: no timestamped entries found in transcript "
+                "for %s; falling back to truncated single-shot.", date,
+            )
+            return self._summarize_single_shot(
+                date, transcript_text[:SINGLE_SHOT_CHAR_LIMIT],
+            )
+
+        buckets = _bucket_by_hour(entries)
+        log.info(
+            "SummaryGenerator: %d entries across %d hour bucket(s) for %s",
+            len(entries), len(buckets), date,
+        )
+
+        hour_summaries: list[tuple[int, str]] = []
+        for hour in sorted(buckets):
+            try:
+                summary = self._summarize_hour(date, hour, buckets[hour])
+            except SummaryError as exc:
+                # Don't let one transient failure kill the whole report.
+                log.warning(
+                    "SummaryGenerator: hour %02d:00 map call failed (%s); "
+                    "inserting placeholder", hour, exc,
+                )
+                summary = f"ACTIVITY: hour summary unavailable ({exc})"
+            hour_summaries.append((hour, summary))
+
+        joined = "\n\n".join(
+            f"=== {hour:02d}:00 - {hour:02d}:59 ===\n{summary}"
+            for hour, summary in hour_summaries
+        )
+        prompt = _REDUCE_PROMPT_TEMPLATE.format(
+            date=date.isoformat(),
+            hour_summaries=joined,
+        )
+        return self._call_anthropic(prompt, max_tokens=MAX_TOKENS)
+
+    def _summarize_hour(
+        self, date: _dt.date, hour: int, hour_transcript: str,
+    ) -> str:
+        prompt = _HOUR_PROMPT_TEMPLATE.format(
+            date=date.isoformat(),
+            hour=hour,
+            transcript=hour_transcript,
+        )
+        return self._call_anthropic(prompt, max_tokens=HOUR_MAX_TOKENS)
+
+    # ------------------------------------------------------------------
     # HTTP
     # ------------------------------------------------------------------
 
-    def _call_anthropic(self, prompt: str) -> str:
+    def _call_anthropic(self, prompt: str, max_tokens: int = MAX_TOKENS) -> str:
         payload = json.dumps({
             "model": self.model,
-            "max_tokens": MAX_TOKENS,
+            "max_tokens": max_tokens,
             "messages": [{"role": "user", "content": prompt}],
         }).encode("utf-8")
 
@@ -267,3 +426,28 @@ def _extract_api_error(body: str) -> str:
         return err.get("message", "") or ""
     except (json.JSONDecodeError, AttributeError):
         return ""
+
+
+def _parse_entries(text: str) -> list[tuple[int, str]]:
+    """
+    Parse a NeoSCAN transcript into (hour, raw_entry_text) tuples.
+
+    Each entry begins with a `[HH:MM:SS]` line; we slice the text by the
+    positions of those headers so the surrounding metadata and transcribed
+    speech stay together.
+    """
+    matches = list(_ENTRY_RE.finditer(text))
+    out: list[tuple[int, str]] = []
+    for i, m in enumerate(matches):
+        start = m.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        out.append((int(m.group(1)), text[start:end].rstrip()))
+    return out
+
+
+def _bucket_by_hour(entries: list[tuple[int, str]]) -> dict[int, str]:
+    """Group entries by hour, returning hour -> joined entry text."""
+    buckets: dict[int, list[str]] = {}
+    for hour, entry_text in entries:
+        buckets.setdefault(hour, []).append(entry_text)
+    return {h: "\n\n".join(es) for h, es in buckets.items()}
