@@ -24,9 +24,10 @@ application. It runs on macOS, Windows, and Linux.
   into the editor
 - **Remote Control** — virtual keypad to control the scanner from your
   computer, with a merged live transmission log across all connected radios
-- **Audio Transcription** — optional Whisper-based speech-to-text for each
-  radio; transcripts appear inline in the transmission log and are saved to a
-  daily text file
+- **Audio Transcription** — optional speech-to-text for each radio via a
+  running [whisper-wrapper-api-server](https://github.com/keithlawless/whisper-wrapper-api-server);
+  transcripts appear inline in the transmission log and are saved to a daily
+  text file
 - **Daily AI Summaries** — optional Anthropic Claude integration that turns
   each day's transcript into a nicely formatted HTML report at midnight
 - **Transmission Log Export** — save the session log to CSV
@@ -48,11 +49,8 @@ python3 -m venv .venv
 source .venv/bin/activate       # macOS / Linux
 # .venv\Scripts\activate        # Windows
 
-# Install the core app (no on-device transcription)
+# Install the app
 pip install -e .
-
-# Or install with on-device transcription (downloads ~1 GB of PyTorch + Whisper)
-pip install -e ".[whisper]"
 
 # Run the app
 python main.py
@@ -60,23 +58,30 @@ python main.py
 
 ## Optional Features
 
-### On-device transcription (Whisper)
+### Audio Transcription (whisper-wrapper-api-server)
 
-Whisper is now an optional extra. Install it only if you want NeoSCAN to
-transcribe scanner audio locally:
+NeoSCAN sends scanner audio to a separately running
+[whisper-wrapper-api-server](https://github.com/keithlawless/whisper-wrapper-api-server)
+for speech-to-text transcription. No Whisper libraries are installed inside
+NeoSCAN itself.
 
-```bash
-pip install -e ".[whisper]"
-```
+**Setup:**
 
-If `openai-whisper` isn't installed, NeoSCAN starts normally and the
-**Preferences → Transcription** tab shows a banner explaining how to enable
-it. You can still use the Daily AI Summary feature against transcript files
-produced on another machine.
+1. Clone and start the server (see its README for full instructions):
+   ```bash
+   git clone https://github.com/keithlawless/whisper-wrapper-api-server
+   cd whisper-wrapper-api-server
+   # follow the server README to install dependencies and start it
+   uvicorn app:app --port 8000
+   ```
+2. In NeoSCAN, open **File → Preferences → Transcription**, tick
+   **Enable transcription**, and confirm the server URL (default
+   `http://localhost:8000`).
+3. Choose a Whisper model size and language.
 
 Transcription also requires a supported audio input device (e.g. a USB sound
-card connected to the scanner's audio output). The Whisper model is
-downloaded automatically on first use.
+card connected to the scanner's audio output). The server handles model
+downloads on first use.
 
 ### Daily AI Summaries (Anthropic Claude)
 
@@ -321,7 +326,7 @@ neo-scan/
       radio_connection.py          Per-radio connection state (port, protocol, config)
     audio/
       recorder.py                  Audio capture via sounddevice
-      transcriber.py               Whisper transcription manager and worker thread
+      transcriber.py               Transcription manager and worker (HTTP client to whisper-wrapper-api-server)
       transcript_writer.py         Transcript file writer
       summary_generator.py         Anthropic API client + HTML report renderer
       summary_scheduler.py         Midnight QTimer + catch-up scan for daily summaries
@@ -390,6 +395,10 @@ most likely port in the connection dialog.
 |------------|--------------------------------------|
 | PyQt6      | Cross-platform desktop UI toolkit    |
 | pyserial   | USB/serial communication             |
+
+Audio transcription is handled by the separate
+[whisper-wrapper-api-server](https://github.com/keithlawless/whisper-wrapper-api-server)
+— no Whisper or PyTorch libraries are required inside NeoSCAN.
 
 ## Reference Implementation
 
