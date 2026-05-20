@@ -41,15 +41,13 @@ jobs:
             libxcb-shape0 libxcb-xfixes0 libxkbcommon-x11-0
 
       # ── Python dependencies ──────────────────────────────────────────────
-      # openai-whisper / torch are intentionally excluded — they pull in
-      # ~2 GB of PyTorch which makes bundled executables impractical.
-      # The app detects their absence at runtime and disables transcription
-      # gracefully. Users who want transcription can run from source.
+      # Transcription is handled by the external whisper-wrapper-api-server;
+      # no Whisper or PyTorch libraries are needed inside the app bundle.
 
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
-          pip install PyQt6 pyserial sounddevice numpy scipy noisereduce
+          pip install PyQt6 pyserial sounddevice numpy scipy
           pip install pyinstaller
 
       - name: Install macOS extras
