@@ -47,7 +47,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
-          pip install PyQt6 pyserial sounddevice numpy scipy
+          pip install PyQt6 pyserial sounddevice numpy scipy pillow
           pip install pyinstaller
 
       - name: Install macOS extras
