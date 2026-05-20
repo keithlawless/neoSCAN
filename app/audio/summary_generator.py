@@ -28,6 +28,10 @@ HTTP_TIMEOUT_SEC = 120
 # 80K chars is roughly ~20K tokens, comfortably under any model's context
 # window even with the prompt scaffolding factored in.
 SINGLE_SHOT_CHAR_LIMIT = 80_000
+# Per-hour chunk limit for the map step. ~125K tokens, leaving 75K headroom
+# under the 200K model context limit. Hours that exceed this are split into
+# sub-chunks, each summarised separately before being joined for the reduce step.
+HOUR_CHAR_LIMIT = 500_000
 
 AVAILABLE_MODELS = [
     ("Claude Opus 4.7",   "claude-opus-4-7"),
@@ -337,7 +341,7 @@ class SummaryGenerator:
         hour_summaries: list[tuple[int, str]] = []
         for hour in sorted(buckets):
             try:
-                summary = self._summarize_hour(date, hour, buckets[hour])
+                summary = self._summarize_hour_maybe_chunked(date, hour, buckets[hour])
             except SummaryError as exc:
                 # Don't let one transient failure kill the whole report.
                 log.warning(
@@ -366,6 +370,30 @@ class SummaryGenerator:
             transcript=hour_transcript,
         )
         return self._call_anthropic(prompt, max_tokens=HOUR_MAX_TOKENS)
+
+    def _summarize_hour_maybe_chunked(
+        self, date: _dt.date, hour: int, hour_transcript: str,
+    ) -> str:
+        if len(hour_transcript) <= HOUR_CHAR_LIMIT:
+            return self._summarize_hour(date, hour, hour_transcript)
+
+        sub_chunks = _split_text_into_chunks(hour_transcript, HOUR_CHAR_LIMIT)
+        log.info(
+            "SummaryGenerator: hour %02d:00 is %d chars — splitting into %d sub-chunks",
+            hour, len(hour_transcript), len(sub_chunks),
+        )
+        sub_summaries: list[str] = []
+        for chunk in sub_chunks:
+            try:
+                sub_summaries.append(self._summarize_hour(date, hour, chunk))
+            except SummaryError as exc:
+                log.warning(
+                    "SummaryGenerator: hour %02d:00 sub-chunk failed (%s); skipping",
+                    hour, exc,
+                )
+        if not sub_summaries:
+            return f"ACTIVITY: hour {hour:02d}:00 summary unavailable (all sub-chunks failed)"
+        return "\n\n".join(sub_summaries)
 
     # ------------------------------------------------------------------
     # HTTP
@@ -451,3 +479,30 @@ def _bucket_by_hour(entries: list[tuple[int, str]]) -> dict[int, str]:
     for hour, entry_text in entries:
         buckets.setdefault(hour, []).append(entry_text)
     return {h: "\n\n".join(es) for h, es in buckets.items()}
+
+
+def _split_text_into_chunks(text: str, char_limit: int) -> list[str]:
+    """Split a joined transcript into chunks <= char_limit at entry boundaries."""
+    matches = list(_ENTRY_RE.finditer(text))
+    if not matches:
+        return [text[:char_limit]]
+
+    chunks: list[str] = []
+    chunk_start = 0
+    chunk_len = 0
+
+    for i, m in enumerate(matches):
+        entry_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        entry_len = entry_end - m.start()
+
+        if chunk_len + entry_len > char_limit and chunk_len > 0:
+            chunks.append(text[chunk_start:m.start()])
+            chunk_start = m.start()
+            chunk_len = 0
+
+        chunk_len += entry_len
+
+    if chunk_len > 0:
+        chunks.append(text[chunk_start:])
+
+    return chunks or [text[:char_limit]]

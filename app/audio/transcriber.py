@@ -3,13 +3,16 @@ Transcription pipeline for NeoSCAN.
 
 TranscriptionManager  — owned by MainWindow; bridges the log panel, recorder,
                          worker thread, and transcript writer.
-TranscriberWorker     — QThread that processes transcription jobs serially.
-_ModelLoaderThread    — QThread that loads the Whisper model in the background.
+TranscriberWorker     — QThread that processes transcription jobs serially,
+                         sending audio to a whisper-wrapper HTTP server.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -33,62 +36,21 @@ from app.ui.settings.preferences_dialog import load_prefs
 
 log = logging.getLogger(__name__)
 
-try:
-    import whisper as _whisper_probe  # noqa: F401  (probe import only)
-    WHISPER_AVAILABLE = True
-    del _whisper_probe
-except ImportError:
-    WHISPER_AVAILABLE = False
-
 _DEFAULT_MODEL = "base"
 _DEFAULT_LANGUAGE = DEFAULT_LANGUAGE
+_DEFAULT_SERVER_URL = "http://localhost:8000"
 _MAX_QUEUE_DEPTH = 10   # drop new jobs rather than let memory and latency grow unbounded
-_MAX_AUDIO_SECS = 60    # cap the *speech-only* audio sent to Whisper at this many seconds
+_MAX_AUDIO_SECS = 60    # cap audio sent to server at this many seconds
 
-# silero-vad parameters. The defaults here are conservative for scanner
-# traffic: short utterances (a few words) are common, so we keep
-# min_speech_duration_ms low. speech_pad_ms keeps a little context around
-# each chunk so Whisper doesn't lose word onsets/offsets.
-_VAD_THRESHOLD = 0.5
-_VAD_MIN_SPEECH_MS = 250
-_VAD_MIN_SILENCE_MS = 100
-_VAD_SPEECH_PAD_MS = 150
+_MULTIPART_BOUNDARY = b"NeoSCANBoundary"
 
 
-def _extract_speech(
-    audio: np.ndarray,
-    vad_model,
-) -> Optional[np.ndarray]:
-    """
-    Run silero-vad over `audio` and return only the speech portions
-    concatenated, or None if no speech was detected. On any error, returns
-    the original audio so the pipeline degrades gracefully.
-    """
-    try:
-        import torch
-        from silero_vad import get_speech_timestamps  # deferred
-    except ImportError:
-        return audio
-
-    try:
-        wav = torch.from_numpy(audio.astype(np.float32))
-        timestamps = get_speech_timestamps(
-            wav,
-            vad_model,
-            sampling_rate=SAMPLE_RATE,
-            threshold=_VAD_THRESHOLD,
-            min_speech_duration_ms=_VAD_MIN_SPEECH_MS,
-            min_silence_duration_ms=_VAD_MIN_SILENCE_MS,
-            speech_pad_ms=_VAD_SPEECH_PAD_MS,
-        )
-    except Exception as exc:
-        log.warning("VAD failed — using raw audio: %s", exc)
-        return audio
-
-    if not timestamps:
-        return None
-    chunks = [audio[t["start"]:t["end"]] for t in timestamps]
-    return np.concatenate(chunks).astype(np.float32)
+def _multipart_field(name: str, value: str) -> bytes:
+    return (
+        b"--" + _MULTIPART_BOUNDARY + b"\r\n"
+        b'Content-Disposition: form-data; name="' + name.encode() + b'"\r\n\r\n'
+        + value.encode() + b"\r\n"
+    )
 
 
 @dataclass
@@ -103,43 +65,10 @@ class _TranscriptionJob:
     radio: str = ""
 
 
-class _ModelLoaderThread(QThread):
-    """Loads Whisper and (optionally) silero-vad in the background."""
-
-    model_loaded = pyqtSignal(object, object)  # whisper_model, vad_model_or_None
-    load_failed = pyqtSignal(str)
-
-    def __init__(self, model_size: str, parent=None) -> None:
-        super().__init__(parent)
-        self._model_size = model_size
-
-    def run(self) -> None:
-        try:
-            import whisper  # deferred — optional dependency
-            log.info("Loading Whisper model '%s'…", self._model_size)
-            whisper_model = whisper.load_model(self._model_size)
-            log.info("Whisper model '%s' loaded", self._model_size)
-
-            vad_model = None
-            try:
-                from silero_vad import load_silero_vad  # deferred — optional
-                log.info("Loading silero-vad model…")
-                vad_model = load_silero_vad()
-                log.info("silero-vad model loaded")
-            except ImportError:
-                log.info("silero-vad not installed — VAD will be skipped")
-            except Exception as exc:
-                log.warning("Failed to load silero-vad — VAD will be skipped: %s", exc)
-
-            self.model_loaded.emit(whisper_model, vad_model)
-        except Exception as exc:
-            log.error("Failed to load Whisper model: %s", exc)
-            self.load_failed.emit(str(exc))
-
-
 class TranscriberWorker(QThread):
     """
-    Processes transcription jobs serially on a background thread.
+    Processes transcription jobs serially on a background thread,
+    posting audio to a whisper-wrapper HTTP server.
 
     Signals:
         transcription_ready(row_index, text, job)
@@ -149,14 +78,14 @@ class TranscriberWorker(QThread):
 
     def __init__(
         self,
-        model,
-        vad_model=None,
+        server_url: str,
+        model_size: str,
         language: Optional[str] = _DEFAULT_LANGUAGE,
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self._model = model
-        self._vad_model = vad_model
+        self._server_url = server_url.rstrip("/")
+        self._model_size = model_size
         self._language: Optional[str] = language
         self._queue: list[_TranscriptionJob] = []
         self._mutex = QMutex()
@@ -213,71 +142,74 @@ class TranscriberWorker(QThread):
                     "check input device gain and cable connection",
                     job.row_index, peak,
                 )
-            # Normalize peak so Whisper's internal VAD always sees adequate
-            # signal regardless of input gain or system type.
+
+            # Normalize peak so the server's VAD always sees adequate signal
+            # regardless of input gain or system type.
             normalized = raw / peak if peak > 0.0 else raw
 
-            # Voice activity detection: drop the dead air before Whisper sees
-            # it. Whisper hallucinates aggressively on silence/static, so this
-            # is the single biggest lever against false transcriptions.
-            #
-            # Run VAD on the *full* clip — truncating first would throw away
-            # speech that happens to fall after the cap when the start of the
-            # clip is mostly squelch tail.
-            if self._vad_model is not None:
-                speech = _extract_speech(normalized, self._vad_model)
-                if speech is None:
-                    log.info("Transcription row %d: VAD found no speech, skipping",
-                             job.row_index)
-                    self.transcription_ready.emit(job.row_index, "", job)
-                    return
-                speech_secs = len(speech) / SAMPLE_RATE
-                log.debug(
-                    "  row %d: VAD kept %.2fs of %.2fs (%.0f%%)",
-                    job.row_index, speech_secs, duration,
-                    100.0 * speech_secs / max(duration, 0.001),
-                )
-                normalized = speech
-
-            # Cap the (now speech-only) audio at _MAX_AUDIO_SECS so Whisper
-            # decoding latency stays bounded and the worker queue can drain.
+            # Cap audio at _MAX_AUDIO_SECS so server latency and queue drain stay bounded.
             max_samples = int(_MAX_AUDIO_SECS * SAMPLE_RATE)
             if len(normalized) > max_samples:
                 log.debug(
-                    "TranscriberWorker: truncating %.1fs of speech to %ds for row %d",
+                    "TranscriberWorker: truncating %.1fs to %ds for row %d",
                     len(normalized) / SAMPLE_RATE, _MAX_AUDIO_SECS, job.row_index,
                 )
                 normalized = normalized[:max_samples]
 
-            # Pad with 1 s of silence so Whisper flushes the final segment.
-            # Without this, audio that ends abruptly (squelch closing mid-word)
-            # is often dropped from the last incomplete segment.
-            audio = np.concatenate([normalized,
-                                    np.zeros(SAMPLE_RATE, dtype=np.float32)])
-            result = self._model.transcribe(
-                audio,
-                fp16=False,
-                language=self._language,
-                condition_on_previous_text=False,
-                no_speech_threshold=0.8,
+            audio_bytes = normalized.astype(np.float32).tobytes()
+
+            body = (
+                b"--" + _MULTIPART_BOUNDARY + b"\r\n"
+                b'Content-Disposition: form-data; name="audio"; filename="audio.raw"\r\n'
+                b"Content-Type: application/octet-stream\r\n\r\n"
+                + audio_bytes + b"\r\n"
+                + _multipart_field("format", "raw_f32_16k")
+                + _multipart_field("model", self._model_size)
+                + _multipart_field("vad", "true")
+                + (_multipart_field("language", self._language) if self._language else b"")
+                + b"--" + _MULTIPART_BOUNDARY + b"--\r\n"
             )
+            req = urllib.request.Request(
+                f"{self._server_url}/v1/transcribe",
+                data=body,
+                headers={
+                    "Content-Type": (
+                        f"multipart/form-data; boundary={_MULTIPART_BOUNDARY.decode()}"
+                    )
+                },
+            )
+            with urllib.request.urlopen(req, timeout=90) as resp:
+                result = json.loads(resp.read())
+
             for seg in result.get("segments", []):
                 log.debug(
                     "  row %d seg [%.1f-%.1fs] no_speech_prob=%.3f %r",
                     job.row_index, seg["start"], seg["end"],
-                    seg.get("no_speech_prob", 0), seg["text"][:80],
+                    seg.get("no_speech_prob") or 0.0, seg["text"][:80],
                 )
             text = result.get("text", "").strip()
             if text:
                 log.info("Transcription row %d: %r", job.row_index, text[:200])
             else:
                 log.warning(
-                    "Transcription row %d: Whisper returned empty text for %.1fs of "
-                    "audio — check that the scanner audio cable is connected to the "
-                    "selected input device and the volume is adequate.",
+                    "Transcription row %d: server returned empty text for %.1fs of audio — "
+                    "check scanner audio cable, input device, and volume.",
                     job.row_index, duration,
                 )
             self.transcription_ready.emit(job.row_index, text, job)
+
+        except urllib.error.URLError as exc:
+            log.warning(
+                "Transcription row %d: could not reach whisper-wrapper server (%s) — skipping",
+                job.row_index, exc.reason,
+            )
+            self.transcription_ready.emit(job.row_index, "", job)
+        except TimeoutError:
+            log.warning(
+                "Transcription row %d: request to whisper-wrapper timed out — skipping",
+                job.row_index,
+            )
+            self.transcription_ready.emit(job.row_index, "", job)
         except Exception as exc:
             log.error("Transcription failed for row %d: %s", job.row_index, exc)
             self.transcription_ready.emit(job.row_index, f"[error: {exc}]", job)
@@ -285,7 +217,7 @@ class TranscriberWorker(QThread):
 
 class TranscriptionManager(QObject):
     """
-    Coordinates audio recording, Whisper transcription, and file writing.
+    Coordinates audio recording, whisper-wrapper transcription, and file writing.
     Owned by MainWindow. Call apply_settings() on startup and after Prefs.
 
     transcription_ready signal is forwarded from the worker so LogPanel can
@@ -305,13 +237,9 @@ class TranscriptionManager(QObject):
         self._recorder = AudioRecorder()
         self._writer = TranscriptWriter()
         self._worker: Optional[TranscriberWorker] = None
-        self._loader: Optional[_ModelLoaderThread] = None
-        self._model = None
-        # _per_radio_enabled comes from the connection dialog; _enabled is the
-        # effective state after factoring in the global toggle and whether
-        # Whisper is actually importable. apply_settings() recomputes _enabled.
         self._per_radio_enabled = enabled
-        self._enabled = enabled and WHISPER_AVAILABLE
+        self._enabled = enabled
+        self._server_url = _DEFAULT_SERVER_URL
         self._current_model_size = ""
         self._current_language: Optional[str] = _DEFAULT_LANGUAGE
         self._radio_label = radio_label
@@ -323,7 +251,7 @@ class TranscriptionManager(QObject):
     # ------------------------------------------------------------------
 
     def apply_settings(self) -> None:
-        """Read QSettings and (re)configure recorder, writer, and model.
+        """Read QSettings and (re)configure recorder, writer, and worker.
 
         device_index is set at construction time and is not read here.
         Effective _enabled is recomputed each call from per-radio + global flags.
@@ -349,17 +277,22 @@ class TranscriptionManager(QObject):
                 self._worker.set_language(language)
 
         global_enabled = settings.value("transcription/enabled", True, type=bool)
-        self._enabled = self._per_radio_enabled and global_enabled and WHISPER_AVAILABLE
+        self._enabled = self._per_radio_enabled and global_enabled
 
+        server_url = settings.value(
+            "transcription/whisper_server_url", _DEFAULT_SERVER_URL
+        ).strip() or _DEFAULT_SERVER_URL
         model_size = settings.value("transcription/model_size", _DEFAULT_MODEL)
-        if self._enabled and model_size != self._current_model_size:
-            self._load_model(model_size)
 
-        if not self._enabled:
-            # Keep model in memory if already loaded — just don't use it
-            if not WHISPER_AVAILABLE:
-                log.debug("TranscriptionManager: openai-whisper not installed")
-            elif not global_enabled:
+        if self._enabled:
+            if (self._worker is None
+                    or server_url != self._server_url
+                    or model_size != self._current_model_size):
+                self._server_url = server_url
+                self._current_model_size = model_size
+                self._start_worker()
+        else:
+            if not global_enabled:
                 log.debug("TranscriptionManager: globally disabled in preferences")
             else:
                 log.debug("TranscriptionManager: per-radio transcription disabled")
@@ -394,8 +327,8 @@ class TranscriptionManager(QObject):
             self.transcription_ready.emit(row_index, "", None)
             return
         self._maybe_save_audio(audio, entry)
-        if self._worker is None or self._model is None:
-            log.warning("TranscriptionManager: model not ready — dropping job for row %d",
+        if self._worker is None:
+            log.warning("TranscriptionManager: worker not ready — dropping job for row %d",
                         row_index)
             return
         job = _TranscriptionJob(
@@ -424,7 +357,6 @@ class TranscriptionManager(QObject):
             radio_name = re.sub(r"[^\w\-]", "_", self._radio_label or "radio")
             timestamp = entry.start_time.strftime("%Y%m%d-%H%M%S")
             filename = out_dir / f"{radio_name}-{timestamp}.wav"
-            import numpy as np
             from scipy.io import wavfile
             pcm = (audio * 32767).clip(-32768, 32767).astype(np.int16)
             wavfile.write(str(filename), 16000, pcm)
@@ -450,69 +382,38 @@ class TranscriptionManager(QObject):
 
         if self._worker:
             self._worker.stop()
-            # Allow up to 15 s for any in-progress Whisper job to finish.
-            # If it still hasn't stopped, terminate() it so the QThread is
-            # not destroyed while still running (causes abort on macOS).
+            # Allow up to 15 s for any in-progress job to finish.
             if not self._worker.wait(15000):
                 log.warning("TranscriptionManager: worker did not stop in time — terminating")
                 self._worker.terminate()
                 self._worker.wait(2000)
             self._worker = None
 
-        if self._loader:
-            # Model loader has no stop mechanism; wait up to 30 s then force-terminate.
-            if not self._loader.wait(30000):
-                log.warning("TranscriptionManager: model loader did not finish in time — terminating")
-                self._loader.terminate()
-                self._loader.wait(2000)
-            self._loader = None
-
     # ------------------------------------------------------------------
     # Private
     # ------------------------------------------------------------------
 
-    def _load_model(self, model_size: str) -> None:
-        # Shut down existing worker before replacing model
+    def _start_worker(self) -> None:
+        """Create and start a fresh TranscriberWorker."""
         if self._worker:
             self._worker.stop()
             self._worker.wait(3000)
             self._worker = None
 
-        self._current_model_size = model_size
-
-        if self._loader:
-            self._loader.wait(3000)
-
-        self._loader = _ModelLoaderThread(model_size, parent=self)
-        self._loader.model_loaded.connect(self._on_model_loaded)
-        self._loader.load_failed.connect(self._on_model_load_failed)
-        self._loader.finished.connect(self._loader.deleteLater)
-        self._loader.start()
-
-    def _on_model_loaded(self, model, vad_model) -> None:
-        self._model = model
-        self._loader = None
         self._worker = TranscriberWorker(
-            model,
-            vad_model=vad_model,
+            self._server_url,
+            self._current_model_size,
             language=self._current_language,
             parent=self,
         )
-        # Use an explicit slot (not signal-to-signal) so Qt's auto-connection
-        # correctly marshals the call to the main thread via a queued connection.
         self._worker.transcription_ready.connect(self._on_worker_transcription_ready)
         self._worker.start()
         log.info(
-            "TranscriptionManager: worker started with Whisper '%s'%s",
-            self._current_model_size,
-            " + silero-vad" if vad_model is not None else " (no VAD)",
+            "TranscriptionManager: worker started (server=%s, model=%s)",
+            self._server_url, self._current_model_size,
         )
 
     @pyqtSlot(int, str, object)
     def _on_worker_transcription_ready(self, row_index: int, text: str, job) -> None:
         """Relay worker result to main thread, then re-emit for LogPanel."""
         self.transcription_ready.emit(row_index, text, job)
-
-    def _on_model_load_failed(self, error: str) -> None:
-        self._loader = None
-        log.error("TranscriptionManager: model load failed — %s", error)

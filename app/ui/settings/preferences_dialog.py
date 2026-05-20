@@ -37,14 +37,6 @@ _ORG = "NeoSCAN"
 _APP = "NeoSCAN"
 
 
-def _whisper_installed() -> bool:
-    """Probe-import openai-whisper to decide whether to enable its UI."""
-    try:
-        import whisper  # noqa: F401
-        return True
-    except ImportError:
-        return False
-
 
 def load_prefs() -> QSettings:
     return QSettings(_ORG, _APP)
@@ -228,32 +220,20 @@ class PreferencesDialog(QDialog):
         page = QWidget()
         layout = QVBoxLayout(page)
 
-        whisper_present = _whisper_installed()
-
-        # Top: global enable + (optional) install warning
+        # Top: global enable
         self._tx_global_enable = QCheckBox(
-            "Enable transcription (use Whisper to convert scanner audio to text)"
+            "Enable transcription (requires whisper-wrapper server at the URL below)"
         )
         self._tx_global_enable.stateChanged.connect(self._on_global_enable_changed)
         layout.addWidget(self._tx_global_enable)
 
-        if not whisper_present:
-            warn = QLabel(
-                "openai-whisper is not installed. Install it with "
-                "<code>pip install -e \".[whisper]\"</code> to enable on-device "
-                "transcription. Daily summaries can still be generated from "
-                "transcript files produced by another machine."
-            )
-            warn.setWordWrap(True)
-            warn.setStyleSheet(
-                "background: #fff3cd; border: 1px solid #d6b656; "
-                "border-radius: 4px; padding: 6px; color: #5a4500;"
-            )
-            layout.addWidget(warn)
-
-        # --- Whisper config ---
-        self._tx_whisper_box = QGroupBox("Whisper")
+        # --- Whisper Server config ---
+        self._tx_whisper_box = QGroupBox("Whisper Server")
         tx_form = QFormLayout(self._tx_whisper_box)
+
+        self._tx_server_url_edit = QLineEdit()
+        self._tx_server_url_edit.setPlaceholderText("http://localhost:8000")
+        tx_form.addRow("Server URL:", self._tx_server_url_edit)
 
         self._tx_model_combo = QComboBox()
         self._tx_model_combo.addItems(["tiny", "base", "small", "medium", "large"])
@@ -336,14 +316,6 @@ class PreferencesDialog(QDialog):
 
         layout.addWidget(self._summary_box)
         layout.addStretch()
-
-        # If Whisper isn't installed, lock the global toggle off and grey the
-        # Whisper subgroup. The summary subgroup remains usable so reports can
-        # still be generated from transcript files copied in from elsewhere.
-        if not whisper_present:
-            self._tx_global_enable.setEnabled(False)
-            self._tx_whisper_box.setEnabled(False)
-
         return page
 
     # ------------------------------------------------------------------
@@ -425,10 +397,9 @@ class PreferencesDialog(QDialog):
             w.setEnabled(pt_on)
 
     def _on_global_enable_changed(self, state: int) -> None:
-        # Only governs the Whisper subgroup; the summary section can still be
+        # Only governs the Whisper Server subgroup; the summary section can still be
         # used to generate reports from transcripts produced elsewhere.
-        if _whisper_installed():
-            self._tx_whisper_box.setEnabled(bool(state))
+        self._tx_whisper_box.setEnabled(bool(state))
 
     def _on_summary_enable_changed(self, state: int) -> None:
         on = bool(state)
@@ -479,6 +450,11 @@ class PreferencesDialog(QDialog):
                 self._pt_device_combo.setCurrentIndex(i)
                 break
 
+        server_url = self._settings.value(
+            "transcription/whisper_server_url", "http://localhost:8000"
+        )
+        self._tx_server_url_edit.setText(server_url)
+
         model_size = self._settings.value("transcription/model_size", "base")
         idx = self._tx_model_combo.findText(model_size)
         if idx >= 0:
@@ -500,11 +476,7 @@ class PreferencesDialog(QDialog):
         audio_dir = self._settings.value("transcription/audio_save_dir", "")
         self._audio_dir_edit.setText(audio_dir)
 
-        # Global transcription enable (default on, for backwards compat).
-        # If Whisper isn't installed, force off regardless of saved value.
         global_enabled = self._settings.value("transcription/enabled", True, type=bool)
-        if not _whisper_installed():
-            global_enabled = False
         self._tx_global_enable.setChecked(global_enabled)
         self._on_global_enable_changed(int(global_enabled))
 
@@ -535,6 +507,8 @@ class PreferencesDialog(QDialog):
                                 self._pt_enable.isChecked())
         self._settings.setValue("transcription/output_device_index",
                                 self._pt_device_combo.currentData())
+        self._settings.setValue("transcription/whisper_server_url",
+                                self._tx_server_url_edit.text().strip())
         self._settings.setValue("transcription/model_size",
                                 self._tx_model_combo.currentText())
         self._settings.setValue("transcription/language",

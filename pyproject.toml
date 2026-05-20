@@ -20,10 +20,6 @@ dev = [
     "pytest>=7.0",
     "pytest-qt>=4.0",
 ]
-whisper = [
-    "openai-whisper>=20231117",
-    "silero-vad>=5.0",
-]
 
 [project.scripts]
 neo-scan = "main:main"
