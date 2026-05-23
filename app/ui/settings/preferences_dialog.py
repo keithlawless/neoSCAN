@@ -327,6 +327,20 @@ class PreferencesDialog(QDialog):
         adsb_box = QGroupBox("ADS-B Traffic Logging")
         adsb_form = QFormLayout(adsb_box)
 
+        # dump1090 executable path (needed on Windows; optional elsewhere)
+        dump1090_row = QHBoxLayout()
+        self._dump1090_path_edit = QLineEdit()
+        self._dump1090_path_edit.setPlaceholderText(
+            "Leave blank to use system PATH  "
+            "(Windows: required — set to dump1090.exe location)"
+        )
+        dump1090_browse_btn = QPushButton("Browse…")
+        dump1090_browse_btn.setFixedWidth(70)
+        dump1090_browse_btn.clicked.connect(self._browse_dump1090_exe)
+        dump1090_row.addWidget(self._dump1090_path_edit, 1)
+        dump1090_row.addWidget(dump1090_browse_btn)
+        adsb_form.addRow("dump1090 executable:", dump1090_row)
+
         self._adsb_log_enable = QCheckBox("Record ADS-B traffic to daily CSV files")
         self._adsb_log_enable.stateChanged.connect(self._on_adsb_log_enable_changed)
         adsb_form.addRow("", self._adsb_log_enable)
@@ -407,6 +421,17 @@ class PreferencesDialog(QDialog):
         )
         if directory:
             self._audio_dir_edit.setText(directory)
+
+    def _browse_dump1090_exe(self) -> None:
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select dump1090 executable",
+            self._dump1090_path_edit.text(),
+            "Executables (*.exe);;All files (*)" if __import__("platform").system() == "Windows"
+            else "All files (*)",
+        )
+        if path:
+            self._dump1090_path_edit.setText(path)
 
     def _browse_adsb_dir(self) -> None:
         directory = QFileDialog.getExistingDirectory(
@@ -544,6 +569,8 @@ class PreferencesDialog(QDialog):
 
         self._report_dir_edit.setText(self._settings.value("transcription/report_dir", ""))
 
+        self._dump1090_path_edit.setText(self._settings.value("adsb/dump1090_path", ""))
+
         adsb_enabled = self._settings.value("adsb/log_enabled", False, type=bool)
         self._adsb_log_enable.setChecked(adsb_enabled)
         self._adsb_dir_edit.setText(self._settings.value("adsb/log_dir", ""))
@@ -580,6 +607,7 @@ class PreferencesDialog(QDialog):
         self._settings.setValue("transcription/report_dir",
                                 self._report_dir_edit.text().strip())
 
+        self._settings.setValue("adsb/dump1090_path", self._dump1090_path_edit.text().strip())
         self._settings.setValue("adsb/log_enabled", self._adsb_log_enable.isChecked())
         self._settings.setValue("adsb/log_dir", self._adsb_dir_edit.text().strip())
 

@@ -835,9 +835,11 @@ class MainWindow(QMainWindow):
         if dlg.exec() != ConnectSDRDialog.DialogCode.Accepted:
             return
 
+        settings = load_prefs()
+        exe_path = settings.value("adsb/dump1090_path", "") or None
         self._dump1090 = Dump1090Manager(parent=self)
         self._dump1090.status_changed.connect(self._on_sdr_status_changed)
-        self._dump1090.start(dlg.device_index, dlg.gain)
+        self._dump1090.start(dlg.device_index, dlg.gain, exe_path=exe_path)
 
     def _on_sdr_status_changed(self, running: bool, message: str) -> None:
         self._adsb_panel.on_sdr_status_changed(running, message)

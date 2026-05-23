@@ -6,11 +6,14 @@ from a list of named devices rather than guessing an index number.
 """
 from __future__ import annotations
 
+import os
+import platform
 import re
 import shutil
 import subprocess
 from dataclasses import dataclass
 
+from PyQt6.QtCore import QSettings
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -24,6 +27,15 @@ from PyQt6.QtWidgets import (
 
 from app.sdr.dump1090_manager import Dump1090Manager
 
+# Common Windows locations for rtl_test.exe (part of the rtl-sdr binary package)
+_WIN_RTL_TEST_CANDIDATES = [
+    r"C:\rtl-sdr\rtl_test.exe",
+    r"C:\Program Files\rtl-sdr\rtl_test.exe",
+    r"C:\Program Files (x86)\rtl-sdr\rtl_test.exe",
+    os.path.join(os.path.expanduser("~"), "rtl-sdr", "rtl_test.exe"),
+    os.path.join(os.path.expanduser("~"), "Downloads", "rtl-sdr", "rtl_test.exe"),
+]
+
 
 @dataclass
 class _SDRDevice:
@@ -36,22 +48,52 @@ class _SDRDevice:
 
 def _scan_devices() -> tuple[list[_SDRDevice], str]:
     """
-    Run `rtl_test` (part of the rtl-sdr suite) to enumerate attached RTL-SDR
-    devices.  Returns (device_list, status_message).
+    Enumerate attached RTL-SDR devices. Returns (device_list, status_message).
 
-    rtl_test output (first few lines):
-        Found 2 device(s):
-          0:  Realtek, RTL2838UHIDIR, SN: 00000001
-          1:  Realtek, RTL2832U OEM,  SN: 00000002
+    Tries pyrtlsdr first (cleaner, cross-platform), then falls back to the
+    rtl_test subprocess (part of the rtl-sdr tools package).
     """
+    # --- pyrtlsdr (preferred) ---
+    try:
+        from rtlsdr import RtlSdr  # type: ignore[import]
+        count = RtlSdr.get_device_count()
+        if count == 0:
+            return [], _no_device_message()
+        devices = []
+        for i in range(count):
+            try:
+                name = RtlSdr.get_device_name(i)
+                serial = RtlSdr.get_device_serial(i)
+                desc = f"{name}, SN: {serial}" if serial else name
+            except Exception:
+                desc = f"RTL-SDR device {i}"
+            devices.append(_SDRDevice(index=i, description=desc))
+        return devices, f"{count} device(s) found"
+    except ImportError:
+        pass  # pyrtlsdr not installed — fall through to rtl_test
+    except OSError:
+        pass  # native librtlsdr not found — fall through to rtl_test
+
+    # --- rtl_test subprocess (fallback) ---
     exe = shutil.which("rtl_test")
+    if exe is None and platform.system() == "Windows":
+        for path in _WIN_RTL_TEST_CANDIDATES:
+            if os.path.isfile(path):
+                exe = path
+                break
+
     if exe is None:
+        if platform.system() == "Windows":
+            return [], (
+                "Cannot enumerate devices: pyrtlsdr not installed and rtl_test.exe\n"
+                "not found. Install pyrtlsdr (pip install pyrtlsdr) or download\n"
+                "the rtl-sdr Windows package from https://osmocom.org/projects/rtl-sdr"
+            )
         return [], "rtl_test not found — install rtl-sdr (brew install rtl-sdr)"
 
     try:
-        # rtl_test will run forever if not interrupted; we only need the header
-        # lines that list available devices. It prints them immediately before
-        # trying to open a device, so we read with a short timeout then kill.
+        # rtl_test runs indefinitely; the device list is printed immediately,
+        # so we kill it after a short timeout.
         proc = subprocess.Popen(
             [exe],
             stdout=subprocess.PIPE,
@@ -70,7 +112,6 @@ def _scan_devices() -> tuple[list[_SDRDevice], str]:
         return [], f"Could not run rtl_test: {exc}"
 
     devices: list[_SDRDevice] = []
-    # Match lines like "  0:  Realtek, RTL2838UHIDIR, SN: 00000001"
     pattern = re.compile(r"^\s*(\d+):\s+(.+)$")
     for line in output_lines:
         m = pattern.match(line)
@@ -78,13 +119,22 @@ def _scan_devices() -> tuple[list[_SDRDevice], str]:
             devices.append(_SDRDevice(index=int(m.group(1)), description=m.group(2).strip()))
 
     if not devices:
-        # Check whether "no devices" was reported explicitly
         combined = " ".join(output_lines).lower()
         if "no supported" in combined or "found 0" in combined:
-            return [], "No RTL-SDR devices found — check USB connection"
+            return [], _no_device_message()
         return [], "No devices detected in rtl_test output — check USB connection"
 
     return devices, f"{len(devices)} device(s) found"
+
+
+def _no_device_message() -> str:
+    if platform.system() == "Windows":
+        return (
+            "No RTL-SDR devices found.\n"
+            "Check the USB connection and verify the WinUSB driver is installed\n"
+            "via Zadig (https://zadig.akeo.ie)."
+        )
+    return "No RTL-SDR devices found — check USB connection"
 
 
 class ConnectSDRDialog(QDialog):
@@ -98,6 +148,8 @@ class ConnectSDRDialog(QDialog):
         self.setWindowTitle("Connect SDR (ADS-B)")
         self.setMinimumWidth(480)
         self._devices: list[_SDRDevice] = []
+        settings = QSettings("NeoSCAN", "NeoSCAN")
+        self._dump1090_path: str = settings.value("adsb/dump1090_path", "") or ""
         self._build_ui()
         self._refresh_devices()
 
@@ -109,7 +161,8 @@ class ConnectSDRDialog(QDialog):
         layout = QVBoxLayout(self)
 
         # dump1090 install status
-        installed, version_or_error = Dump1090Manager.is_installed()
+        custom = self._dump1090_path or None
+        installed, version_or_error = Dump1090Manager.is_installed(custom_path=custom)
         self._dump1090_label = QLabel(version_or_error)
         self._dump1090_label.setWordWrap(True)
         if installed:
@@ -177,7 +230,7 @@ class ConnectSDRDialog(QDialog):
             self._scan_status_label.setStyleSheet("color: #c0392b; font-size: 11px;")
 
         # Connect button requires both dump1090 installed and a device selected
-        installed, _ = Dump1090Manager.is_installed()
+        installed, _ = Dump1090Manager.is_installed(custom_path=self._dump1090_path or None)
         self._connect_btn.setEnabled(installed and bool(self._devices))
 
     # ------------------------------------------------------------------

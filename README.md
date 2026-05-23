@@ -146,6 +146,28 @@ are removed. Emergency squawks highlight rows in red; alert squawks in yellow.
 error, unplug the dongle, wait 2 seconds, and reconnect it. This resolves the
 conflict in most cases.
 
+**Windows setup:** Windows requires some additional one-time steps:
+
+1. **Install the WinUSB driver** using [Zadig](https://zadig.akeo.ie/):
+   - Plug in the RTL-SDR dongle.
+   - Open Zadig → Options → List All Devices.
+   - Select **Bulk-In, Interface (Interface 0)** (or your dongle's name).
+   - Choose **WinUSB** and click **Install Driver**.
+
+2. **Install dump1090** — download a Windows build from the
+   [dump1090-fa releases page](https://github.com/flightaware/dump1090/releases)
+   and extract it to a folder (e.g. `C:\dump1090-fa\`).
+
+3. **Point NeoSCAN to dump1090** — open **File → Preferences → ADS-B**,
+   click Browse next to *dump1090 executable*, and select `dump1090.exe`.
+
+4. **Device enumeration** — install `pyrtlsdr` for automatic device listing:
+   ```
+   pip install pyrtlsdr
+   ```
+   Alternatively, download the [rtl-sdr Windows binaries](https://osmocom.org/projects/rtl-sdr/wiki/Rtl-sdr)
+   and add the folder to your system PATH so `rtl_test.exe` is accessible.
+
 **Traffic logging:**
 
 Enable logging in **File → Preferences → ADS-B**. When enabled, NeoSCAN writes

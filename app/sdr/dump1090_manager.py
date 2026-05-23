@@ -7,6 +7,8 @@ dump1090 must be installed on the host (e.g. `brew install dump1090-mutability`)
 from __future__ import annotations
 
 import logging
+import os
+import platform
 import shutil
 import subprocess
 import threading
@@ -20,6 +22,31 @@ log = logging.getLogger(__name__)
 
 _STARTUP_WAIT_SECS = 5.0
 
+# Common Windows locations where dump1090 is typically extracted.
+_WIN_DUMP1090_CANDIDATES = [
+    r"C:\dump1090-fa\dump1090.exe",
+    r"C:\dump1090\dump1090.exe",
+    r"C:\Program Files\dump1090-fa\dump1090.exe",
+    r"C:\Program Files (x86)\dump1090-fa\dump1090.exe",
+    os.path.join(os.path.expanduser("~"), "dump1090-fa", "dump1090.exe"),
+    os.path.join(os.path.expanduser("~"), "Downloads", "dump1090-fa", "dump1090.exe"),
+]
+
+
+def _find_dump1090_exe(custom_path: Optional[str] = None) -> Optional[str]:
+    """Return the path to a working dump1090 executable, or None."""
+    if custom_path and os.path.isfile(custom_path):
+        return custom_path
+    # Standard PATH search (works on macOS/Linux after brew/apt install)
+    exe = shutil.which("dump1090") or shutil.which("dump1090-mutability") or shutil.which("dump1090-fa")
+    if exe:
+        return exe
+    if platform.system() == "Windows":
+        for path in _WIN_DUMP1090_CANDIDATES:
+            if os.path.isfile(path):
+                return path
+    return None
+
 
 def _translate_error(stderr: str) -> str:
     """
@@ -28,8 +55,19 @@ def _translate_error(stderr: str) -> str:
     """
     s = stderr.lower()
 
-    if "usb_claim_interface error" in s or "kernel driver is active" in s:
-        import platform
+    if "usb_claim_interface error" in s or "kernel driver is active" in s or \
+            ("libusb" in s and "error" in s):
+        if platform.system() == "Windows":
+            return (
+                "RTL-SDR USB driver not installed or incorrect.\n\n"
+                "Windows requires the WinUSB driver. To install it:\n"
+                "1. Download Zadig from https://zadig.akeo.ie\n"
+                "2. Plug in the RTL-SDR dongle.\n"
+                "3. In Zadig: Options → List All Devices, then select\n"
+                "   'Bulk-In, Interface (Interface 0)'.\n"
+                "4. Choose 'WinUSB' and click 'Install Driver'.\n"
+                "Then reconnect the dongle and try again."
+            )
         if platform.system() == "Darwin":
             return (
                 "USB device is claimed by the macOS kernel driver.\n\n"
@@ -52,6 +90,13 @@ def _translate_error(stderr: str) -> str:
         )
 
     if "no supported" in s or "no rtlsdr" in s or "no such file or directory" in s:
+        if platform.system() == "Windows":
+            return (
+                "No RTL-SDR device found.\n\n"
+                "Check that the dongle is plugged in, then verify that the\n"
+                "WinUSB driver is installed via Zadig (https://zadig.akeo.ie).\n"
+                "Click Refresh in the Connect SDR dialog and try again."
+            )
         return (
             "No RTL-SDR device found.\n\n"
             "Check that the dongle is plugged in and recognised by the OS,\n"
@@ -109,10 +154,17 @@ class Dump1090Manager(QObject):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def is_installed() -> tuple[bool, str]:
-        """Return (True, version_string) if dump1090 is on PATH, else (False, error)."""
-        exe = shutil.which("dump1090") or shutil.which("dump1090-mutability")
+    def is_installed(custom_path: Optional[str] = None) -> tuple[bool, str]:
+        """Return (True, version_string) if dump1090 is found, else (False, error)."""
+        exe = _find_dump1090_exe(custom_path)
         if exe is None:
+            if platform.system() == "Windows":
+                return False, (
+                    "dump1090 not found.\n\n"
+                    "Download dump1090-fa for Windows from:\n"
+                    "  https://github.com/flightaware/dump1090/releases\n"
+                    "Extract it, then set the path in Preferences → ADS-B."
+                )
             return False, (
                 "dump1090 not found. Install with:\n"
                 "  macOS:  brew install dump1090-mutability\n"
@@ -128,15 +180,16 @@ class Dump1090Manager(QObject):
         except Exception as exc:
             return False, str(exc)
 
-    def start(self, device_index: int = 0, gain: str = "auto") -> None:
+    def start(self, device_index: int = 0, gain: str = "auto",
+              exe_path: Optional[str] = None) -> None:
         """Launch dump1090 with --net enabled. Emits status_changed when ready."""
         if self._proc and self._proc.poll() is None:
             log.warning("Dump1090Manager: already running")
             return
 
-        exe = shutil.which("dump1090") or shutil.which("dump1090-mutability")
+        exe = _find_dump1090_exe(exe_path)
         if exe is None:
-            self.status_changed.emit(False, "dump1090 not found on PATH")
+            self.status_changed.emit(False, "dump1090 not found — set path in Preferences → ADS-B")
             return
 
         # Kill any stale dump1090 left over from a previous session so it
