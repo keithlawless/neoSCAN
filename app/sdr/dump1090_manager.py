@@ -66,6 +66,15 @@ def _translate_error(stderr: str) -> str:
             "then log out and back in."
         )
 
+    if "address already in use" in s:
+        return (
+            "A dump1090 process from a previous session is still running and\n"
+            "holding the network ports.\n\n"
+            "Fix: disconnect and reconnect SDR — NeoSCAN will stop the old\n"
+            "process automatically. If the problem persists, run in Terminal:\n"
+            "  pkill -f dump1090"
+        )
+
     if stderr.strip():
         # Unknown error — show the last 3 lines of stderr
         lines = [l for l in stderr.splitlines() if l.strip()]
@@ -129,6 +138,19 @@ class Dump1090Manager(QObject):
         if exe is None:
             self.status_changed.emit(False, "dump1090 not found on PATH")
             return
+
+        # Kill any stale dump1090 left over from a previous session so it
+        # doesn't hold the network ports we're about to bind.
+        try:
+            result = subprocess.run(
+                ["pkill", "-f", "dump1090"],
+                capture_output=True,
+            )
+            if result.returncode == 0:
+                log.info("Dump1090Manager: killed stale dump1090 process")
+                time.sleep(0.5)  # give OS time to release port bindings
+        except Exception:
+            pass
 
         self._device_index = device_index
         self._gain = gain
