@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
 )
 
 from app.sdr.aircraft_state import Aircraft, AircraftStateTracker
+from app.sdr.adsb_logger import ADSBLogger
 
 log = logging.getLogger(__name__)
 
@@ -78,6 +79,7 @@ class ADSBPanel(QWidget):
         super().__init__(parent)
         self._tracker = AircraftStateTracker()
         self._icao_to_row: dict[str, int] = {}  # ICAO → current table row
+        self._logger: Optional[ADSBLogger] = None
         self._build_ui()
 
         self._timer = QTimer(self)
@@ -88,6 +90,14 @@ class ADSBPanel(QWidget):
     # ------------------------------------------------------------------
     # Public API (called by MainWindow)
     # ------------------------------------------------------------------
+
+    def set_logger(self, logger: Optional[ADSBLogger]) -> None:
+        self._logger = logger
+
+    def flush_logger(self) -> None:
+        """Write all currently-tracked aircraft to the log (call on disconnect)."""
+        if self._logger:
+            self._logger.flush_all(self._tracker.snapshot().values())
 
     def on_aircraft_updated(self, icao: str, fields: dict) -> None:
         self._tracker.update(icao, **fields)
@@ -170,6 +180,11 @@ class ADSBPanel(QWidget):
             item = self._table.item(row, COL_ICAO)
             if item:
                 self._icao_to_row[item.text()] = row
+
+        # Log removed aircraft before we drop them from the grid.
+        if removed and self._logger:
+            for ac in removed.values():
+                self._logger.log(ac)
 
         # Remove purged rows in descending row order so earlier indices stay
         # valid as rows are deleted, then rebuild the map from column 0.

@@ -54,19 +54,19 @@ class AircraftStateTracker:
         with self._lock:
             return dict(self._aircraft)
 
-    def purge(self, grey_secs: int = 60, remove_secs: int = 300) -> set[str]:
+    def purge(self, grey_secs: int = 60, remove_secs: int = 300) -> dict[str, Aircraft]:
         """
         Remove aircraft not heard in remove_secs seconds.
-        Returns the set of ICAOs that were removed.
+        Returns a dict of ICAO → Aircraft for each removed aircraft.
         """
         now = datetime.now()
-        removed: set[str] = set()
+        removed: dict[str, Aircraft] = {}
         with self._lock:
             for icao, ac in list(self._aircraft.items()):
                 age = (now - ac.last_seen).total_seconds()
                 if age > remove_secs:
                     del self._aircraft[icao]
-                    removed.add(icao)
+                    removed[icao] = ac
         return removed
 
     def clear(self) -> None:

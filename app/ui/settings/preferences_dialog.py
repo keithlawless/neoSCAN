@@ -31,6 +31,7 @@ from app.audio.summary_generator import (
     DEFAULT_REPORT_DIR,
 )
 from app.serial.port_manager import list_ports
+from app.sdr.adsb_logger import DEFAULT_DIR as _ADSB_DEFAULT_DIR
 
 
 _ORG = "NeoSCAN"
@@ -109,6 +110,7 @@ class PreferencesDialog(QDialog):
         tabs.addTab(self._build_logging_tab(),       "Logging")
         tabs.addTab(self._build_audio_tab(),         "Audio")
         tabs.addTab(self._build_transcription_tab(), "Transcription")
+        tabs.addTab(self._build_adsb_tab(),          "ADS-B")
         layout.addWidget(tabs)
 
         buttons = QDialogButtonBox(
@@ -318,6 +320,40 @@ class PreferencesDialog(QDialog):
         layout.addStretch()
         return page
 
+    def _build_adsb_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        adsb_box = QGroupBox("ADS-B Traffic Logging")
+        adsb_form = QFormLayout(adsb_box)
+
+        self._adsb_log_enable = QCheckBox("Record ADS-B traffic to daily CSV files")
+        self._adsb_log_enable.stateChanged.connect(self._on_adsb_log_enable_changed)
+        adsb_form.addRow("", self._adsb_log_enable)
+
+        adsb_dir_row = QHBoxLayout()
+        self._adsb_dir_edit = QLineEdit()
+        self._adsb_dir_edit.setPlaceholderText(_ADSB_DEFAULT_DIR)
+        adsb_browse_btn = QPushButton("Browse…")
+        adsb_browse_btn.setFixedWidth(70)
+        adsb_browse_btn.clicked.connect(self._browse_adsb_dir)
+        adsb_dir_row.addWidget(self._adsb_dir_edit, 1)
+        adsb_dir_row.addWidget(adsb_browse_btn)
+        self._adsb_dir_label = QLabel("Save directory:")
+        adsb_form.addRow(self._adsb_dir_label, adsb_dir_row)
+
+        note = QLabel(
+            "One file per day: adsb-YYYY-MM-DD.csv\n"
+            "Aircraft are recorded when they leave the grid (after 5 min of silence)\n"
+            "or when the SDR is disconnected."
+        )
+        note.setStyleSheet("color: gray; font-size: 11px;")
+        adsb_form.addRow("", note)
+
+        layout.addWidget(adsb_box)
+        layout.addStretch()
+        return page
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -371,6 +407,18 @@ class PreferencesDialog(QDialog):
         )
         if directory:
             self._audio_dir_edit.setText(directory)
+
+    def _browse_adsb_dir(self) -> None:
+        directory = QFileDialog.getExistingDirectory(
+            self, "Select ADS-B log directory", self._adsb_dir_edit.text() or _ADSB_DEFAULT_DIR
+        )
+        if directory:
+            self._adsb_dir_edit.setText(directory)
+
+    def _on_adsb_log_enable_changed(self, state: int) -> None:
+        on = bool(state)
+        self._adsb_dir_label.setEnabled(on)
+        self._adsb_dir_edit.setEnabled(on)
 
     def _browse_report_dir(self) -> None:
         directory = QFileDialog.getExistingDirectory(
@@ -496,6 +544,11 @@ class PreferencesDialog(QDialog):
 
         self._report_dir_edit.setText(self._settings.value("transcription/report_dir", ""))
 
+        adsb_enabled = self._settings.value("adsb/log_enabled", False, type=bool)
+        self._adsb_log_enable.setChecked(adsb_enabled)
+        self._adsb_dir_edit.setText(self._settings.value("adsb/log_dir", ""))
+        self._on_adsb_log_enable_changed(int(adsb_enabled))
+
     def _save_and_accept(self) -> None:
         self._settings.setValue("serial/default_port", self._port_combo.currentText())
         self._settings.setValue("serial/auto_connect", self._auto_connect.isChecked())
@@ -526,6 +579,9 @@ class PreferencesDialog(QDialog):
                                 self._anthropic_model_combo.currentData() or DEFAULT_SUMMARY_MODEL)
         self._settings.setValue("transcription/report_dir",
                                 self._report_dir_edit.text().strip())
+
+        self._settings.setValue("adsb/log_enabled", self._adsb_log_enable.isChecked())
+        self._settings.setValue("adsb/log_dir", self._adsb_dir_edit.text().strip())
 
         self._settings.sync()
         self.accept()

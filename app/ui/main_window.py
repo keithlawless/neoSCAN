@@ -37,6 +37,7 @@ from app.ui.adsb.adsb_panel import ADSBPanel
 from app.ui.adsb.connect_sdr_dialog import ConnectSDRDialog
 from app.sdr.dump1090_manager import Dump1090Manager
 from app.sdr.adsb_receiver import ADSBReceiver
+from app.sdr.adsb_logger import ADSBLogger
 from app.audio.transcriber import TranscriptionManager
 from app.audio.transcript_writer import TranscriptWriter
 from app.audio.summary_scheduler import SummaryScheduler
@@ -91,6 +92,7 @@ class MainWindow(QMainWindow):
         self._shared_writer = TranscriptWriter()
         self._dump1090: Dump1090Manager | None = None
         self._adsb_receiver: ADSBReceiver | None = None
+        self._adsb_logger = ADSBLogger()
 
         self._build_menu()
         self._build_central()
@@ -108,8 +110,11 @@ class MainWindow(QMainWindow):
         self._summary_warned_this_batch = False
         QTimer.singleShot(2000, self._summary_scheduler.trigger_catch_up)
 
-        # Auto-connect if the user has enabled it in preferences.
+        # Load ADS-B logger settings.
         settings = load_prefs()
+        self._apply_adsb_logger_settings(settings)
+
+        # Auto-connect if the user has enabled it in preferences.
         if settings.value("serial/auto_connect", False, type=bool):
             port = settings.value("serial/default_port", "")
             if port:
@@ -300,6 +305,7 @@ class MainWindow(QMainWindow):
 
         # --- ADS-B tab ---
         self._adsb_panel = ADSBPanel()
+        self._adsb_panel.set_logger(self._adsb_logger)
         self._tabs.addTab(self._adsb_panel, "ADS-B")
 
         self.setCentralWidget(self._tabs)
@@ -767,6 +773,7 @@ class MainWindow(QMainWindow):
             for radio in self._radios:
                 if radio.transcription_manager:
                     radio.transcription_manager.apply_settings()
+            self._apply_adsb_logger_settings(settings)
             # The user may have just enabled summaries or fixed a bad API key;
             # reset the per-batch warning flag and re-run catch-up so any
             # outstanding days get picked up.
@@ -818,6 +825,11 @@ class MainWindow(QMainWindow):
     # SDR / ADS-B
     # ------------------------------------------------------------------
 
+    def _apply_adsb_logger_settings(self, settings) -> None:
+        enabled = settings.value("adsb/log_enabled", False, type=bool)
+        directory = settings.value("adsb/log_dir", "") or None
+        self._adsb_logger.configure(enabled, directory)
+
     def _on_connect_sdr(self) -> None:
         dlg = ConnectSDRDialog(parent=self)
         if dlg.exec() != ConnectSDRDialog.DialogCode.Accepted:
@@ -854,6 +866,7 @@ class MainWindow(QMainWindow):
         if self._dump1090:
             self._dump1090.stop()
             self._dump1090 = None
+        self._adsb_panel.flush_logger()
         self._adsb_panel.reset()
         self._connect_sdr_act.setEnabled(True)
         self._disconnect_sdr_act.setEnabled(False)
@@ -890,6 +903,8 @@ class MainWindow(QMainWindow):
             self._adsb_receiver.wait(3000)
         if self._dump1090:
             self._dump1090.stop()
+        self._adsb_panel.flush_logger()
+        self._adsb_logger.close()
 
         if hasattr(self, "_summary_scheduler"):
             self._summary_scheduler.shutdown()
