@@ -39,7 +39,15 @@ application. It runs on macOS, Windows, and Linux.
 ## Requirements
 
 - Python 3.11 or newer
-- A supported Uniden scanner connected via USB
+
+**For scanner programming and remote control:**
+- One of the supported Uniden scanner models below, connected via USB:
+  BCT15X, BCD996XT, or BCD996P2
+
+**For ADS-B reception (optional, independent of scanner):**
+- An RTL2832U-based RTL-SDR USB dongle — tested with RTL-SDR Blog V3 and V4;
+  other RTL2832U devices (NooElec NESDR, generic sticks) should also work
+- dump1090 installed on the host (see ADS-B setup below)
 
 ## Quick Start
 
