@@ -33,6 +33,10 @@ from app.ui.editor.csv_import_dialog import CSVImportDialog
 from app.ui.editor.trunk_site_import_dialog import TrunkSiteImportDialog
 from app.ui.remote_control.control_panel import ControlPanel
 from app.ui.remote_control.log_panel import LogPanel
+from app.ui.adsb.adsb_panel import ADSBPanel
+from app.ui.adsb.connect_sdr_dialog import ConnectSDRDialog
+from app.sdr.dump1090_manager import Dump1090Manager
+from app.sdr.adsb_receiver import ADSBReceiver
 from app.audio.transcriber import TranscriptionManager
 from app.audio.transcript_writer import TranscriptWriter
 from app.audio.summary_scheduler import SummaryScheduler
@@ -85,6 +89,8 @@ class MainWindow(QMainWindow):
         self._connect_worker: _ConnectWorker | None = None
         self._config: ScannerConfig | None = None
         self._shared_writer = TranscriptWriter()
+        self._dump1090: Dump1090Manager | None = None
+        self._adsb_receiver: ADSBReceiver | None = None
 
         self._build_menu()
         self._build_central()
@@ -207,6 +213,19 @@ class MainWindow(QMainWindow):
         self._download_action.setEnabled(False)
         scanner_menu.addAction(self._download_action)
 
+        # SDR
+        sdr_menu = menubar.addMenu("S&DR")
+
+        self._connect_sdr_act = QAction("Connect SDR (ADS-B)…", self)
+        self._connect_sdr_act.setStatusTip("Start dump1090 and connect to RTL-SDR for ADS-B reception")
+        self._connect_sdr_act.triggered.connect(self._on_connect_sdr)
+        sdr_menu.addAction(self._connect_sdr_act)
+
+        self._disconnect_sdr_act = QAction("Disconnect SDR", self)
+        self._disconnect_sdr_act.setEnabled(False)
+        self._disconnect_sdr_act.triggered.connect(self._on_disconnect_sdr)
+        sdr_menu.addAction(self._disconnect_sdr_act)
+
         # Help
         help_menu = menubar.addMenu("&Help")
         about_action = QAction("&About NeoSCAN", self)
@@ -278,6 +297,10 @@ class MainWindow(QMainWindow):
 
         rc_layout.addWidget(rc_splitter)
         self._tabs.addTab(rc_widget, "Remote Control")
+
+        # --- ADS-B tab ---
+        self._adsb_panel = ADSBPanel()
+        self._tabs.addTab(self._adsb_panel, "ADS-B")
 
         self.setCentralWidget(self._tabs)
 
@@ -791,6 +814,51 @@ class MainWindow(QMainWindow):
         )
         box.exec()
 
+    # ------------------------------------------------------------------
+    # SDR / ADS-B
+    # ------------------------------------------------------------------
+
+    def _on_connect_sdr(self) -> None:
+        dlg = ConnectSDRDialog(parent=self)
+        if dlg.exec() != ConnectSDRDialog.DialogCode.Accepted:
+            return
+
+        self._dump1090 = Dump1090Manager(parent=self)
+        self._dump1090.status_changed.connect(self._on_sdr_status_changed)
+        self._dump1090.start(dlg.device_index, dlg.gain)
+
+    def _on_sdr_status_changed(self, running: bool, message: str) -> None:
+        self._adsb_panel.on_sdr_status_changed(running, message)
+        if running:
+            self._connect_sdr_act.setEnabled(False)
+            self._disconnect_sdr_act.setEnabled(True)
+            self.statusBar().showMessage("SDR connected — receiving ADS-B", 5000)
+            self._adsb_receiver = ADSBReceiver(parent=self)
+            self._adsb_receiver.aircraft_updated.connect(self._adsb_panel.on_aircraft_updated)
+            self._adsb_receiver.connection_changed.connect(self._adsb_panel.on_receiver_status_changed)
+            self._adsb_receiver.start()
+        else:
+            self._connect_sdr_act.setEnabled(True)
+            self._disconnect_sdr_act.setEnabled(False)
+            self.statusBar().showMessage(f"SDR: {message}", 5000)
+            if self._adsb_receiver:
+                self._adsb_receiver.stop()
+                self._adsb_receiver.wait(3000)
+                self._adsb_receiver = None
+
+    def _on_disconnect_sdr(self) -> None:
+        if self._adsb_receiver:
+            self._adsb_receiver.stop()
+            self._adsb_receiver.wait(3000)
+            self._adsb_receiver = None
+        if self._dump1090:
+            self._dump1090.stop()
+            self._dump1090 = None
+        self._adsb_panel.reset()
+        self._connect_sdr_act.setEnabled(True)
+        self._disconnect_sdr_act.setEnabled(False)
+        self.statusBar().showMessage("SDR disconnected", 3000)
+
     def closeEvent(self, event) -> None:
         if self._config and self._config.modified:
             reply = QMessageBox.question(
@@ -816,6 +884,12 @@ class MainWindow(QMainWindow):
             if radio.transcription_manager:
                 radio.transcription_manager.shutdown()
             port_manager.close_port(radio.conn)
+
+        if self._adsb_receiver:
+            self._adsb_receiver.stop()
+            self._adsb_receiver.wait(3000)
+        if self._dump1090:
+            self._dump1090.stop()
 
         if hasattr(self, "_summary_scheduler"):
             self._summary_scheduler.shutdown()
