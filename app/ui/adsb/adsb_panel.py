@@ -163,6 +163,14 @@ class ADSBPanel(QWidget):
         snapshot = self._tracker.snapshot()
         now = datetime.now()
 
+        # Resync row map from column 0 — sorting between ticks may have moved
+        # rows, leaving _icao_to_row pointing at wrong indices.
+        self._icao_to_row = {}
+        for row in range(self._table.rowCount()):
+            item = self._table.item(row, COL_ICAO)
+            if item:
+                self._icao_to_row[item.text()] = row
+
         # Remove purged rows in descending row order so earlier indices stay
         # valid as rows are deleted, then rebuild the map from column 0.
         if removed:
