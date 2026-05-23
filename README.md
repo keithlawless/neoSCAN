@@ -31,6 +31,10 @@ application. It runs on macOS, Windows, and Linux.
 - **Daily AI Summaries** — optional Anthropic Claude integration that turns
   each day's transcript into a nicely formatted HTML report at midnight
 - **Transmission Log Export** — save the session log to CSV
+- **ADS-B Reception** — connect an RTL-SDR USB dongle to receive live aircraft
+  transponder broadcasts on 1090 MHz; a live grid shows ICAO address, callsign,
+  altitude, speed, track, position, squawk, and alert status for every aircraft
+  in range, with traffic logged to daily CSV files
 
 ## Requirements
 
@@ -101,6 +105,56 @@ midnight while it is open, and on next launch automatically generates reports
 for any past day that has a transcript but no report yet.
 
 No new Python dependency is required — the API call uses the standard library.
+
+### ADS-B Reception (RTL-SDR + dump1090)
+
+NeoSCAN can receive live ADS-B aircraft transponder broadcasts using an
+[RTL-SDR](https://www.rtl-sdr.com/) USB dongle and
+[dump1090](https://github.com/flightaware/dump1090).
+
+**Requirements:**
+
+- An RTL-SDR USB dongle (RTL-SDR Blog V3/V4 or similar RTL2832U-based device)
+- `dump1090` installed on the host:
+  ```bash
+  # macOS
+  brew install dump1090-mutability
+  # Linux (Debian/Ubuntu)
+  sudo apt install dump1090-mutability
+  ```
+- `rtl-sdr` tools (for device enumeration in the connect dialog):
+  ```bash
+  # macOS
+  brew install rtl-sdr
+  # Linux
+  sudo apt install rtl-sdr
+  ```
+
+**Connecting:**
+
+1. Plug in the RTL-SDR dongle.
+2. Open **SDR → Connect SDR (ADS-B)…**
+3. Select your device from the list (detected automatically via `rtl_test`).
+4. Choose a gain setting (Auto works well for most locations).
+5. Click **Connect**. NeoSCAN launches dump1090 and connects to its data stream.
+
+The **ADS-B** tab shows a live aircraft grid that updates every second.
+Aircraft not heard for 60 seconds are shown in grey; those silent for 5 minutes
+are removed. Emergency squawks highlight rows in red; alert squawks in yellow.
+
+**macOS note:** If you see a "USB device is claimed by the macOS kernel driver"
+error, unplug the dongle, wait 2 seconds, and reconnect it. This resolves the
+conflict in most cases.
+
+**Traffic logging:**
+
+Enable logging in **File → Preferences → ADS-B**. When enabled, NeoSCAN writes
+one CSV row per aircraft to a daily file (`adsb-YYYY-MM-DD.csv`) when the
+aircraft leaves the grid or the SDR is disconnected. Fields recorded: ICAO,
+callsign, first/last seen times, duration, altitude, speed, track, position,
+squawk, and alert flags.
+
+---
 
 ## CSV Import
 
@@ -330,6 +384,11 @@ neo-scan/
       transcript_writer.py         Transcript file writer
       summary_generator.py         Anthropic API client + HTML report renderer
       summary_scheduler.py         Midnight QTimer + catch-up scan for daily summaries
+    sdr/
+      dump1090_manager.py          dump1090 subprocess lifecycle manager
+      adsb_receiver.py             SBS TCP client QThread (connects to dump1090 :30003)
+      aircraft_state.py            Aircraft dataclass and state tracker
+      adsb_logger.py               Daily CSV logger for ADS-B traffic
     ui/
       main_window.py               Main application window (multi-radio tabs)
       editor/
@@ -343,9 +402,12 @@ neo-scan/
       remote_control/
         control_panel.py           Virtual scanner keypad and display
         log_panel.py               Multi-radio transmission logger with CSV export
+      adsb/
+        adsb_panel.py              Live ADS-B aircraft grid tab
+        connect_sdr_dialog.py      SDR device picker and gain selector
       settings/
         settings_dialog.py         Connection dialog (port, audio device, transcription)
-        preferences_dialog.py      Tabbed app preferences: General / Logging / Audio / Transcription
+        preferences_dialog.py      Tabbed app preferences: General / Logging / Audio / Transcription / ADS-B
   resources/
     icons/                         SVG source + PNG icons at multiple sizes
   tools/
