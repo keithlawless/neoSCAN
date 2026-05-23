@@ -34,9 +34,13 @@ def _translate_error(stderr: str) -> str:
             return (
                 "USB device is claimed by the macOS kernel driver.\n\n"
                 "Fix: unplug the RTL-SDR dongle, wait 2 seconds, then reconnect it.\n"
-                "If this keeps happening, run once in Terminal:\n"
+                "That resolves this in most cases.\n\n"
+                "If it keeps happening, you can release the USB composite driver —\n"
+                "note this affects composite USB devices only, not USB-serial\n"
+                "adapters (FTDI, Prolific, etc.) used by other equipment:\n"
                 "  sudo kextunload -b com.apple.driver.AppleUSBHostCompositeDevice\n"
-                "then reconnect the dongle and try again."
+                "then reconnect the dongle and try again.\n"
+                "The driver reloads automatically on next reboot."
             )
         return (
             "USB device is claimed by a kernel module (dvb_usb_rtl28xxu).\n\n"
