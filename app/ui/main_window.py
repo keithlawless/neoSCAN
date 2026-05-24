@@ -304,14 +304,16 @@ class MainWindow(QMainWindow):
         rc_layout.addWidget(rc_splitter)
         self._tabs.addTab(rc_widget, "Remote Control")
 
-        # --- ADS-B tab ---
+        # --- ADS-B tab (disabled until SDR connects) ---
         self._adsb_panel = ADSBPanel()
         self._adsb_panel.set_logger(self._adsb_logger)
-        self._tabs.addTab(self._adsb_panel, "ADS-B")
+        self._adsb_tab_idx = self._tabs.addTab(self._adsb_panel, "ADS-B")
+        self._tabs.setTabEnabled(self._adsb_tab_idx, False)
 
-        # --- ATC Mode tab ---
+        # --- ATC Mode tab (disabled until SDR connects) ---
         self._atc_panel = ATCPanel(self._adsb_panel.aircraft_snapshot)
-        self._tabs.addTab(self._atc_panel, "ATC Mode")
+        self._atc_tab_idx = self._tabs.addTab(self._atc_panel, "ATC Mode")
+        self._tabs.setTabEnabled(self._atc_tab_idx, False)
 
         self.setCentralWidget(self._tabs)
 
@@ -850,6 +852,10 @@ class MainWindow(QMainWindow):
     def _on_sdr_status_changed(self, running: bool, message: str) -> None:
         self._adsb_panel.on_sdr_status_changed(running, message)
         self._atc_panel.on_sdr_status_changed(running, message)
+        self._tabs.setTabEnabled(self._adsb_tab_idx, running)
+        self._tabs.setTabEnabled(self._atc_tab_idx, running)
+        if not running and self._tabs.currentIndex() in (self._adsb_tab_idx, self._atc_tab_idx):
+            self._tabs.setCurrentIndex(0)
         if running:
             self._connect_sdr_act.setEnabled(False)
             self._disconnect_sdr_act.setEnabled(True)
