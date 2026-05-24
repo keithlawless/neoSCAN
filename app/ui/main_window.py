@@ -849,6 +849,7 @@ class MainWindow(QMainWindow):
 
     def _on_sdr_status_changed(self, running: bool, message: str) -> None:
         self._adsb_panel.on_sdr_status_changed(running, message)
+        self._atc_panel.on_sdr_status_changed(running, message)
         if running:
             self._connect_sdr_act.setEnabled(False)
             self._disconnect_sdr_act.setEnabled(True)

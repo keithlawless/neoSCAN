@@ -345,6 +345,14 @@ class ATCPanel(QWidget):
             except ValueError:
                 pass
 
+    def on_sdr_status_changed(self, running: bool, message: str) -> None:
+        if running:
+            self._sdr_label.setText(f"SDR: {message}")
+            self._sdr_label.setStyleSheet("color: #00c000; font-size: 11px;")
+        else:
+            self._sdr_label.setText("SDR: Not connected")
+            self._sdr_label.setStyleSheet("color: #555; font-size: 11px;")
+
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
@@ -358,8 +366,14 @@ class ATCPanel(QWidget):
         bar = QHBoxLayout()
         bar.setContentsMargins(8, 4, 8, 4)
 
+        self._sdr_label = QLabel("SDR: Not connected")
+        self._sdr_label.setStyleSheet("color: #555; font-size: 11px;")
+        bar.addWidget(self._sdr_label)
+
+        bar.addSpacing(16)
+
         self._loc_label = QLabel("Locating…")
-        self._loc_label.setStyleSheet("color: #666; font-size: 11px;")
+        self._loc_label.setStyleSheet("color: #555; font-size: 11px;")
         bar.addWidget(self._loc_label)
 
         bar.addStretch()
