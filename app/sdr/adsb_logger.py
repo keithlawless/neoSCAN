@@ -22,7 +22,7 @@ log = logging.getLogger(__name__)
 _HEADERS = [
     "date", "icao", "callsign",
     "first_seen", "last_seen", "duration_s",
-    "altitude_ft", "speed_kt", "track_deg",
+    "altitude_ft", "trend", "speed_kt", "track_deg",
     "lat", "lon",
     "squawk", "alert", "emergency", "spi",
 ]
@@ -80,6 +80,7 @@ class ADSBLogger:
                     "last_seen":   ac.last_seen.strftime("%H:%M:%S"),
                     "duration_s":  duration,
                     "altitude_ft": ac.altitude if ac.altitude is not None else "",
+                    "trend":       ac.vertical_trend,
                     "speed_kt":    ac.speed if ac.speed is not None else "",
                     "track_deg":   f"{ac.track:.1f}" if ac.track is not None else "",
                     "lat":         f"{ac.lat:.5f}" if ac.lat is not None else "",

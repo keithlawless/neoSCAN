@@ -33,20 +33,21 @@ _REMOVE_SECS = 300   # seconds before an aircraft is removed from the grid
 _REFRESH_MS  = 1000  # grid refresh interval
 
 _HEADERS = [
-    "ICAO", "Callsign", "Altitude (ft)", "Speed (kt)",
-    "Track (°)", "Lat", "Lon", "Squawk", "Alert", "Last Seen",
+    "ICAO", "Callsign", "Altitude (ft)", "Trend",
+    "Speed (kt)", "Track (°)", "Lat", "Lon", "Squawk", "Alert", "Last Seen",
 ]
 
 COL_ICAO      = 0
 COL_CALLSIGN  = 1
 COL_ALTITUDE  = 2
-COL_SPEED     = 3
-COL_TRACK     = 4
-COL_LAT       = 5
-COL_LON       = 6
-COL_SQUAWK    = 7
-COL_ALERT     = 8
-COL_LAST_SEEN = 9
+COL_TREND     = 3
+COL_SPEED     = 4
+COL_TRACK     = 5
+COL_LAT       = 6
+COL_LON       = 7
+COL_SQUAWK    = 8
+COL_ALERT     = 9
+COL_LAST_SEEN = 10
 
 _COLOR_EMERGENCY = QColor(255, 80, 80)
 _COLOR_ALERT     = QColor(255, 200, 80)
@@ -237,6 +238,7 @@ class ADSBPanel(QWidget):
             ac.icao,
             ac.callsign or "",
             _fmt(ac.altitude),
+            ac.vertical_trend,
             _fmt(ac.speed),
             _fmt(ac.track, ".1f") if ac.track is not None else "",
             _fmt(ac.lat, ".5f") if ac.lat is not None else "",
