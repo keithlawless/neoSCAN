@@ -18,7 +18,7 @@ from datetime import datetime
 from typing import Callable, Optional
 
 from PyQt6.QtCore import QPointF, QSettings, QThread, QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QPolygonF
+from PyQt6.QtGui import QColor, QFont, QKeySequence, QPainter, QPen, QPolygonF, QShortcut
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -98,6 +98,7 @@ class RadarView(QWidget):
         self._pan_nm: tuple[float, float] = (0.0, 0.0)   # east_nm, north_nm
         self._drag_origin: Optional[QPointF] = None
         self._drag_pan0: tuple[float, float] = (0.0, 0.0)
+        self._wheel_acc: float = 0.0   # accumulator for smooth-scroll pixel delta
         self.setMinimumSize(400, 400)
         self.setCursor(Qt.CursorShape.CrossCursor)
         self.setFocusPolicy(Qt.FocusPolicy.WheelFocus)
@@ -232,9 +233,22 @@ class RadarView(QWidget):
     # ------------------------------------------------------------------
 
     def wheelEvent(self, event) -> None:
-        factor = 0.85 if event.angleDelta().y() > 0 else 1.15
+        dy = event.angleDelta().y()
+        if dy == 0:
+            # macOS trackpad smooth-scroll: angleDelta is 0; use pixelDelta.
+            # Accumulate until 20 px are crossed to keep sensitivity reasonable.
+            self._wheel_acc += event.pixelDelta().y()
+            if abs(self._wheel_acc) < 20:
+                event.accept()
+                return
+            dy = self._wheel_acc
+            self._wheel_acc = 0.0
+        else:
+            self._wheel_acc = 0.0
+        factor = 0.85 if dy > 0 else 1.15
         self._range_nm = max(5.0, min(500.0, self._range_nm * factor))
         self.update()
+        event.accept()
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -310,6 +324,7 @@ class ATCPanel(QWidget):
         self._fetcher: Optional[_LocationFetcher] = None
 
         self._build_ui()
+        self._setup_shortcuts()
 
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
@@ -354,6 +369,20 @@ class ATCPanel(QWidget):
             self._sdr_label.setStyleSheet("color: #555; font-size: 11px;")
 
     # ------------------------------------------------------------------
+    # Keyboard shortcuts
+    # ------------------------------------------------------------------
+
+    def _setup_shortcuts(self) -> None:
+        ctx = Qt.ShortcutContext.WidgetWithChildrenShortcut
+        for key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+            s = QShortcut(QKeySequence(key), self)
+            s.setContext(ctx)
+            s.activated.connect(self._zoom_in)
+        s = QShortcut(QKeySequence(Qt.Key.Key_Minus), self)
+        s.setContext(ctx)
+        s.activated.connect(self._zoom_out)
+
+    # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
 
@@ -390,14 +419,21 @@ class ATCPanel(QWidget):
 
         bar.addSpacing(6)
 
+        _btn_style = (
+            "QPushButton { color: #99dd99; background: #0f2a0f;"
+            " border: 1px solid #2a5a2a; border-radius: 3px; font-size: 14px; }"
+            "QPushButton:hover { background: #1a4a1a; }"
+            "QPushButton:pressed { background: #071507; }"
+        )
         for symbol, tip, slot in [
-            ("−", "Zoom out  (scroll down)", self._zoom_out),
-            ("+", "Zoom in  (scroll up)",    self._zoom_in),
-            ("⌂", "Reset to home (double-click radar)", self._reset_view),
+            ("−", "Zoom out  (scroll down  /  −)", self._zoom_out),
+            ("+", "Zoom in   (scroll up    /  +)", self._zoom_in),
+            ("↺", "Reset view  (double-click radar)", self._reset_view),
         ]:
             btn = QPushButton(symbol)
-            btn.setFixedSize(24, 24)
+            btn.setFixedSize(26, 24)
             btn.setToolTip(tip)
+            btn.setStyleSheet(_btn_style)
             btn.clicked.connect(slot)
             bar.addWidget(btn)
 
