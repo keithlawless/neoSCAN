@@ -38,6 +38,7 @@ from app.ui.adsb.connect_sdr_dialog import ConnectSDRDialog
 from app.sdr.dump1090_manager import Dump1090Manager
 from app.sdr.adsb_receiver import ADSBReceiver
 from app.sdr.adsb_logger import ADSBLogger
+from app.ui.atc.atc_panel import ATCPanel
 from app.audio.transcriber import TranscriptionManager
 from app.audio.transcript_writer import TranscriptWriter
 from app.audio.summary_scheduler import SummaryScheduler
@@ -307,6 +308,10 @@ class MainWindow(QMainWindow):
         self._adsb_panel = ADSBPanel()
         self._adsb_panel.set_logger(self._adsb_logger)
         self._tabs.addTab(self._adsb_panel, "ADS-B")
+
+        # --- ATC Mode tab ---
+        self._atc_panel = ATCPanel(self._adsb_panel.aircraft_snapshot)
+        self._tabs.addTab(self._atc_panel, "ATC Mode")
 
         self.setCentralWidget(self._tabs)
 
@@ -774,6 +779,7 @@ class MainWindow(QMainWindow):
                 if radio.transcription_manager:
                     radio.transcription_manager.apply_settings()
             self._apply_adsb_logger_settings(settings)
+            self._atc_panel.apply_settings()
             # The user may have just enabled summaries or fixed a bad API key;
             # reset the per-batch warning flag and re-run catch-up so any
             # outstanding days get picked up.

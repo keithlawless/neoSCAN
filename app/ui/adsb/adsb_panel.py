@@ -92,6 +92,10 @@ class ADSBPanel(QWidget):
     # Public API (called by MainWindow)
     # ------------------------------------------------------------------
 
+    def aircraft_snapshot(self) -> dict:
+        """Return a snapshot of current aircraft state (consumed by ATCPanel)."""
+        return self._tracker.snapshot()
+
     def set_logger(self, logger: Optional[ADSBLogger]) -> None:
         self._logger = logger
 
