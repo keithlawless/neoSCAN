@@ -20,6 +20,9 @@ dev = [
     "pytest>=7.0",
     "pytest-qt>=4.0",
 ]
+sdr = [
+    "pyrtlsdr>=0.2.93",   # optional: cleaner RTL-SDR device enumeration
+]
 
 [project.scripts]
 neo-scan = "main:main"
