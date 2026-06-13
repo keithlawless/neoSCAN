@@ -166,17 +166,23 @@ conflict in most cases.
    [gvanem/Dump1090](https://github.com/gvanem/Dump1090), which provides
    prebuilt `dump1090.exe` binaries for Windows. Extract it to a folder
    (e.g. `C:\dump1090\`). NeoSCAN works with this build as well as the
-   FlightAware/mutability variants.
+   FlightAware/mutability variants — it detects which one you have and
+   adjusts the launch options automatically. Note that the gvanem build
+   takes its gain from its own `dump1090.cfg` (`gain = 0` is AUTO, which it
+   recommends), so the Gain selector in the Connect dialog has no effect with
+   that build; edit `dump1090.cfg` if you need a fixed gain.
 
 3. **Point NeoSCAN to dump1090** — open **File → Preferences → ADS-B**,
    click Browse next to *dump1090 executable*, and select `dump1090.exe`.
 
-4. **Device enumeration** — install `pyrtlsdr` for automatic device listing:
-   ```
-   pip install pyrtlsdr
-   ```
-   Alternatively, download the [rtl-sdr Windows binaries](https://osmocom.org/projects/rtl-sdr/wiki/Rtl-sdr)
-   and add the folder to your system PATH so `rtl_test.exe` is accessible.
+4. **Device selection** — a single dongle works out of the box: pick
+   **Device 0** in the Connect dialog and click Connect; dump1090 opens the
+   device directly. Automatic enumeration of named devices is optional and not
+   available in the packaged build (a system-wide `pip install pyrtlsdr` cannot
+   be seen by the bundled interpreter). If you run NeoSCAN from source and want
+   a named device list, `pip install pyrtlsdr`, or add the
+   [rtl-sdr Windows binaries](https://osmocom.org/projects/rtl-sdr/wiki/Rtl-sdr)
+   to your PATH so `rtl_test.exe` is found.
 
 **Traffic logging:**
 
