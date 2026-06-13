@@ -2,6 +2,14 @@
 
 ---
 
+## v1.2.3 — 2026-06-13
+
+### Windows dump1090 CLI compatibility
+
+- **Fixed "unrecognized option --device-index" when connecting an SDR on Windows**: the recommended [gvanem/Dump1090](https://github.com/gvanem/Dump1090) Windows build has a reduced command-line interface and rejects the `--device-index` and `--gain` options that the FlightAware/mutability builds accept. NeoSCAN now detects the dump1090 build from its version string and launches it with the correct options — the gvanem build starts with just `--net` (RTL-SDR device 0 by default; gain is read from its `dump1090.cfg`), while the FlightAware/mutability builds continue to receive `--device-index` and `--gain`
+
+---
+
 ## v1.2.2 — 2026-06-13
 
 ### Windows ADS-B connect fix
