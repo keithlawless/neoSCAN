@@ -122,6 +122,45 @@ def _kill_stale_dump1090() -> bool:
         return False
 
 
+def _dump1090_flavor(version_line: str) -> str:
+    """
+    Classify the dump1090 build so we can pick the right command-line syntax.
+
+    Returns "gvanem" for the Mongoose-based Windows build (gvanem/Dump1090),
+    which has a reduced option set, or "fa" for the FlightAware / mutability
+    family used on macOS and Linux.
+    """
+    v = (version_line or "").lower()
+    if "dump1090-fa" in v or "mutability" in v:
+        return "fa"
+    # The gvanem build reports e.g. "dump1090 ver: 0.4.9 (Microsoft cl ...,
+    # NETPOLLER=WSAPoll())" and is Mongoose-based.
+    if "ver:" in v or "mongoose" in v or "netpoller" in v:
+        return "gvanem"
+    # Unknown build: the gvanem build is the norm on Windows (our recommended
+    # download); elsewhere assume the FlightAware-style options we always used.
+    return "gvanem" if platform.system() == "Windows" else "fa"
+
+
+def _build_dump1090_cmd(exe: str, device_index: int, gain: str,
+                        version_line: str) -> tuple[list[str], str]:
+    """
+    Build the dump1090 argv for the detected build flavor. Returns (cmd, flavor).
+
+    The gvanem/Dump1090 (Windows) build rejects --device-index and --gain: it
+    captures from RTL-SDR device 0 by default and reads gain from its .cfg file
+    (AUTO by default, which its README recommends). The FlightAware / mutability
+    builds accept both options.
+    """
+    flavor = _dump1090_flavor(version_line)
+    if flavor == "gvanem":
+        return [exe, "--net"], flavor
+    cmd = [exe, "--net", "--device-index", str(device_index)]
+    if gain.lower() != "auto":
+        cmd += ["--gain", gain]
+    return cmd, flavor
+
+
 def _translate_error(stderr: str) -> str:
     """
     Map known dump1090 / librtlsdr error patterns to actionable user messages.
@@ -276,9 +315,24 @@ class Dump1090Manager(QObject):
         self._device_index = device_index
         self._gain = gain
 
-        cmd = [exe, "--net", "--device-index", str(device_index)]
-        if gain.lower() != "auto":
-            cmd += ["--gain", gain]
+        # Pick command-line options to match the dump1090 build. The gvanem
+        # Windows build rejects --device-index / --gain that the FlightAware
+        # builds accept, so detect the flavor from its version string first.
+        version_line = ""
+        try:
+            version_line = _probe_version(exe)
+        except Exception:
+            pass
+        cmd, flavor = _build_dump1090_cmd(exe, device_index, gain, version_line)
+        if flavor == "gvanem":
+            if device_index != 0:
+                log.warning("Dump1090Manager: gvanem build has no device-index "
+                            "option; using its default RTL-SDR device 0 instead "
+                            "of %d", device_index)
+            if gain.lower() != "auto":
+                log.warning("Dump1090Manager: gvanem build has no --gain option; "
+                            "set gain in its dump1090.cfg (gain=0 is AUTO) "
+                            "instead of %s", gain)
 
         log.info("Dump1090Manager: starting %s", " ".join(cmd))
         try:
