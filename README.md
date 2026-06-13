@@ -162,9 +162,11 @@ conflict in most cases.
    - Select **Bulk-In, Interface (Interface 0)** (or your dongle's name).
    - Choose **WinUSB** and click **Install Driver**.
 
-2. **Install dump1090** — download a Windows build from the
-   [dump1090-fa releases page](https://github.com/flightaware/dump1090/releases)
-   and extract it to a folder (e.g. `C:\dump1090-fa\`).
+2. **Install dump1090** — download a ready-to-run Windows build from
+   [gvanem/Dump1090](https://github.com/gvanem/Dump1090), which provides
+   prebuilt `dump1090.exe` binaries for Windows. Extract it to a folder
+   (e.g. `C:\dump1090\`). NeoSCAN works with this build as well as the
+   FlightAware/mutability variants.
 
 3. **Point NeoSCAN to dump1090** — open **File → Preferences → ADS-B**,
    click Browse next to *dump1090 executable*, and select `dump1090.exe`.
