@@ -94,11 +94,14 @@ def _scan_devices() -> tuple[list[_SDRDevice], str]:
     try:
         # rtl_test runs indefinitely; the device list is printed immediately,
         # so we kill it after a short timeout.
+        creationflags = (getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                         if platform.system() == "Windows" else 0)
         proc = subprocess.Popen(
             [exe],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            creationflags=creationflags,
         )
         output_lines: list[str] = []
         try:

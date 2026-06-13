@@ -48,6 +48,80 @@ def _find_dump1090_exe(custom_path: Optional[str] = None) -> Optional[str]:
     return None
 
 
+def _no_window_kwargs() -> dict:
+    """
+    Extra Popen/run kwargs to suppress the console window that Windows pops up
+    for child processes. No-op on other platforms.
+    """
+    if platform.system() == "Windows":
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+    return {}
+
+
+def _probe_version(exe: str, timeout: float = 4.0) -> str:
+    """
+    Run ``<exe> --version`` and return its first non-empty output line.
+
+    We can't simply wait for the process to exit: some dump1090 forks — notably
+    the Mongoose-based Windows build (ver 0.4.x) — print the version line
+    immediately but then start their event loop instead of exiting, so a plain
+    ``subprocess.run(..., timeout=N)`` always raises TimeoutExpired even though
+    the version string was already available. Instead we read the first line of
+    output on a helper thread and kill the process once we have it (or once the
+    timeout elapses).
+    """
+    proc = subprocess.Popen(
+        [exe, "--version"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        **_no_window_kwargs(),
+    )
+    captured: dict[str, str] = {}
+
+    def _read_first_line() -> None:
+        try:
+            for line in proc.stdout:  # type: ignore[union-attr]
+                line = line.strip()
+                if line:
+                    captured["line"] = line
+                    return
+        except Exception:
+            pass
+
+    reader = threading.Thread(target=_read_first_line, daemon=True)
+    reader.start()
+    reader.join(timeout)
+
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    reader.join(0.5)
+    return captured.get("line", "")
+
+
+def _kill_stale_dump1090() -> bool:
+    """
+    Kill any dump1090 left over from a previous session so it doesn't hold the
+    network ports we're about to bind. Returns True if something was killed.
+    """
+    try:
+        if platform.system() == "Windows":
+            result = subprocess.run(
+                ["taskkill", "/F", "/IM", "dump1090.exe"],
+                capture_output=True, **_no_window_kwargs(),
+            )
+            # taskkill exits 0 when it killed something, 128 when no match.
+            return result.returncode == 0
+        result = subprocess.run(["pkill", "-f", "dump1090"], capture_output=True)
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
 def _translate_error(stderr: str) -> str:
     """
     Map known dump1090 / librtlsdr error patterns to actionable user messages.
@@ -112,12 +186,14 @@ def _translate_error(stderr: str) -> str:
         )
 
     if "address already in use" in s:
+        manual = ("  taskkill /F /IM dump1090.exe" if platform.system() == "Windows"
+                  else "  pkill -f dump1090")
         return (
             "A dump1090 process from a previous session is still running and\n"
             "holding the network ports.\n\n"
             "Fix: disconnect and reconnect SDR — NeoSCAN will stop the old\n"
-            "process automatically. If the problem persists, run in Terminal:\n"
-            "  pkill -f dump1090"
+            "process automatically. If the problem persists, run manually:\n"
+            + manual
         )
 
     if stderr.strip():
@@ -171,12 +247,11 @@ class Dump1090Manager(QObject):
                 "  Linux:  sudo apt install dump1090-mutability"
             )
         try:
-            result = subprocess.run(
-                [exe, "--version"],
-                capture_output=True, text=True, timeout=3,
-            )
-            version = (result.stdout + result.stderr).strip().splitlines()[0]
-            return True, version
+            version = _probe_version(exe)
+            # Found and runnable, even if the build didn't print a parseable
+            # version line — fall back to the executable name so the dialog
+            # still shows it as installed rather than failing.
+            return True, version or os.path.basename(exe)
         except Exception as exc:
             return False, str(exc)
 
@@ -194,16 +269,9 @@ class Dump1090Manager(QObject):
 
         # Kill any stale dump1090 left over from a previous session so it
         # doesn't hold the network ports we're about to bind.
-        try:
-            result = subprocess.run(
-                ["pkill", "-f", "dump1090"],
-                capture_output=True,
-            )
-            if result.returncode == 0:
-                log.info("Dump1090Manager: killed stale dump1090 process")
-                time.sleep(0.5)  # give OS time to release port bindings
-        except Exception:
-            pass
+        if _kill_stale_dump1090():
+            log.info("Dump1090Manager: killed stale dump1090 process")
+            time.sleep(0.5)  # give OS time to release port bindings
 
         self._device_index = device_index
         self._gain = gain
@@ -219,6 +287,7 @@ class Dump1090Manager(QObject):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,   # capture so we can surface errors
                 text=True,
+                **_no_window_kwargs(),
             )
         except OSError as exc:
             self.status_changed.emit(False, f"Failed to start dump1090: {exc}")
