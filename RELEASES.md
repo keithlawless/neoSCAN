@@ -2,6 +2,15 @@
 
 ---
 
+## v1.2.2 — 2026-06-13
+
+### Windows ADS-B connect fix
+
+- **Fixed ADS-B being unusable on the Windows binary**: the Connect SDR dialog disabled the Connect button whenever automatic device enumeration found nothing, which it always did in the packaged build (pyrtlsdr is not bundled and `rtl_test.exe` is usually absent). Device enumeration is now treated as best-effort — dump1090 opens the dongle itself — so when no devices are listed the dialog offers a manual index picker (Device 0–3, default 0) and Connect stays enabled as long as dump1090 is installed
+- **Clearer messaging in packaged builds**: the "detection unavailable" notice no longer suggests `pip install pyrtlsdr` (which cannot affect the frozen interpreter) and explains that you can still connect by index
+
+---
+
 ## v1.2.1 — 2026-06-13
 
 ### Windows ADS-B / SDR fixes

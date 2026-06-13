@@ -69,8 +69,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "NeoSCAN",
             "CFBundleDisplayName": "NeoSCAN",
-            "CFBundleShortVersionString": "1.2.1",
-            "CFBundleVersion": "1.2.1",
+            "CFBundleShortVersionString": "1.2.2",
+            "CFBundleVersion": "1.2.2",
             "NSHighResolutionCapable": True,
             "LSMinimumSystemVersion": "10.15",
         },
