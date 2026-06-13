@@ -2,6 +2,17 @@
 
 ---
 
+## v1.2.1 — 2026-06-13
+
+### Windows ADS-B / SDR fixes
+
+- **Fixed dump1090 version check timing out on Windows**: the Connect SDR dialog failed when the dump1090 build prints its version then keeps running (e.g. the Mongoose-based [gvanem/Dump1090](https://github.com/gvanem/Dump1090) build) instead of exiting; the version is now read from the first line of output without waiting for the process to exit
+- **Fixed stale-process cleanup on Windows**: replaced the Unix-only `pkill` with `taskkill` on Windows so leftover dump1090 instances no longer hold network ports on reconnect
+- **Suppressed console windows** that briefly flashed when launching dump1090 and enumerating RTL-SDR devices on Windows
+- **Documentation**: README now points Windows users to gvanem/Dump1090 for a prebuilt `dump1090.exe`
+
+---
+
 ## v1.2.0 — 2026-05-25
 
 ### ADS-B Reception & ATC Radar
