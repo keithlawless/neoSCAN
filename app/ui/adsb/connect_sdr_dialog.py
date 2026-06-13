@@ -11,6 +11,7 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 
 from PyQt6.QtCore import QSettings
@@ -83,13 +84,29 @@ def _scan_devices() -> tuple[list[_SDRDevice], str]:
                 break
 
     if exe is None:
+        # Automatic enumeration is optional — dump1090 opens the device itself,
+        # so the caller still lets the user connect by index. In a packaged
+        # build, pip-installing pyrtlsdr into the system Python can't help the
+        # frozen interpreter, so don't suggest it there.
+        if getattr(sys, "frozen", False):
+            return [], (
+                "Automatic device detection is not available in this packaged "
+                "build. You can still connect — dump1090 opens the device "
+                "directly; choose Device 0 for a single dongle."
+            )
         if platform.system() == "Windows":
             return [], (
-                "Cannot enumerate devices: pyrtlsdr not installed and rtl_test.exe\n"
-                "not found. Install pyrtlsdr (pip install pyrtlsdr) or download\n"
-                "the rtl-sdr Windows package from https://osmocom.org/projects/rtl-sdr"
+                "Automatic device detection unavailable: pyrtlsdr not installed "
+                "and rtl_test.exe not found. Install pyrtlsdr (pip install "
+                "pyrtlsdr) or the rtl-sdr Windows package "
+                "(https://osmocom.org/projects/rtl-sdr) for a named device list. "
+                "You can still connect by index below."
             )
-        return [], "rtl_test not found — install rtl-sdr (brew install rtl-sdr)"
+        return [], (
+            "Automatic device detection unavailable: rtl_test not found "
+            "(install rtl-sdr, e.g. brew install rtl-sdr). You can still "
+            "connect by index below."
+        )
 
     try:
         # rtl_test runs indefinitely; the device list is printed immediately,
@@ -192,6 +209,7 @@ class ConnectSDRDialog(QDialog):
         form.addRow("Device:", device_row)
 
         self._scan_status_label = QLabel("")
+        self._scan_status_label.setWordWrap(True)
         self._scan_status_label.setStyleSheet("color: gray; font-size: 11px;")
         form.addRow("", self._scan_status_label)
 
@@ -220,6 +238,8 @@ class ConnectSDRDialog(QDialog):
         self._device_combo.clear()
         self._devices, status = _scan_devices()
 
+        installed, _ = Dump1090Manager.is_installed(custom_path=self._dump1090_path or None)
+
         if self._devices:
             for dev in self._devices:
                 self._device_combo.addItem(str(dev), userData=dev.index)
@@ -227,14 +247,20 @@ class ConnectSDRDialog(QDialog):
             self._scan_status_label.setText(status)
             self._scan_status_label.setStyleSheet("color: green; font-size: 11px;")
         else:
-            self._device_combo.addItem("No devices found")
-            self._device_combo.setEnabled(False)
+            # Enumeration is best-effort: it needs pyrtlsdr or rtl_test, neither
+            # of which is required to actually receive. dump1090 opens the device
+            # itself, so offer manual index selection (0 covers a single dongle)
+            # rather than blocking the user.
+            for i in range(4):
+                label = "Device 0 (default)" if i == 0 else f"Device {i}"
+                self._device_combo.addItem(label, userData=i)
+            self._device_combo.setEnabled(installed)
             self._scan_status_label.setText(status)
-            self._scan_status_label.setStyleSheet("color: #c0392b; font-size: 11px;")
+            self._scan_status_label.setStyleSheet("color: #b8860b; font-size: 11px;")
 
-        # Connect button requires both dump1090 installed and a device selected
-        installed, _ = Dump1090Manager.is_installed(custom_path=self._dump1090_path or None)
-        self._connect_btn.setEnabled(installed and bool(self._devices))
+        # Connect needs dump1090; a device index is always available now (either
+        # an enumerated device or the manual-index fallback above).
+        self._connect_btn.setEnabled(installed)
 
     # ------------------------------------------------------------------
     # Properties read by MainWindow after accept()
