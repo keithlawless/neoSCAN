@@ -32,6 +32,13 @@ from app.audio.summary_generator import (
 )
 from app.serial.port_manager import list_ports
 from app.sdr.adsb_logger import DEFAULT_DIR as _ADSB_DEFAULT_DIR
+from app.logging_setup import (
+    LEVELS as _LOG_LEVELS,
+    DEFAULT_LEVEL as _DEFAULT_LOG_LEVEL,
+    default_log_dir as _default_log_dir,
+    configured_log_dir as _configured_log_dir,
+    apply_level as _apply_log_level,
+)
 
 
 _ORG = "NeoSCAN"
@@ -178,6 +185,39 @@ class PreferencesDialog(QDialog):
         log_form.addRow("Default save directory:", log_path_row)
 
         layout.addWidget(log_box)
+
+        # --- Application diagnostic log ---
+        app_log_box = QGroupBox("Application Log")
+        app_log_form = QFormLayout(app_log_box)
+
+        self._app_log_level = QComboBox()
+        self._app_log_level.addItems(_LOG_LEVELS)
+        app_log_form.addRow("Log level:", self._app_log_level)
+
+        app_log_path_row = QHBoxLayout()
+        self._app_log_dir_edit = QLineEdit()
+        self._app_log_dir_edit.setPlaceholderText(str(_default_log_dir()))
+        app_log_browse_btn = QPushButton("Browse…")
+        app_log_browse_btn.setFixedWidth(70)
+        app_log_browse_btn.clicked.connect(self._browse_app_log_dir)
+        app_log_open_btn = QPushButton("Open")
+        app_log_open_btn.setFixedWidth(60)
+        app_log_open_btn.setToolTip("Open the current log folder in the file browser")
+        app_log_open_btn.clicked.connect(self._open_app_log_dir)
+        app_log_path_row.addWidget(self._app_log_dir_edit, 1)
+        app_log_path_row.addWidget(app_log_browse_btn)
+        app_log_path_row.addWidget(app_log_open_btn)
+        app_log_form.addRow("Log directory:", app_log_path_row)
+
+        app_log_note = QLabel(
+            "Diagnostic log for troubleshooting (e.g. daily-summary failures).\n"
+            "Rotates at ~1 MB, keeping 5 files. Directory changes take effect "
+            "after restart."
+        )
+        app_log_note.setStyleSheet("color: gray; font-size: 11px;")
+        app_log_form.addRow("", app_log_note)
+
+        layout.addWidget(app_log_box)
         layout.addStretch()
         return page
 
@@ -407,6 +447,23 @@ class PreferencesDialog(QDialog):
         if directory:
             self._log_path_edit.setText(directory)
 
+    def _browse_app_log_dir(self) -> None:
+        directory = QFileDialog.getExistingDirectory(
+            self, "Select application log directory",
+            self._app_log_dir_edit.text() or str(_default_log_dir()),
+        )
+        if directory:
+            self._app_log_dir_edit.setText(directory)
+
+    def _open_app_log_dir(self) -> None:
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtGui import QDesktopServices
+
+        text = self._app_log_dir_edit.text().strip()
+        target = Path(text) if text else _configured_log_dir()
+        target.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+
     def _refresh_output_devices(self) -> None:
         """Populate the audio output device combo from sounddevice."""
         current_data = self._pt_device_combo.currentData()
@@ -521,6 +578,12 @@ class PreferencesDialog(QDialog):
         log_path = self._settings.value("log/save_dir", "")
         self._log_path_edit.setText(log_path)
 
+        app_log_level = self._settings.value("log/app_log_level", _DEFAULT_LOG_LEVEL)
+        idx = self._app_log_level.findText(str(app_log_level).upper())
+        self._app_log_level.setCurrentIndex(idx if idx >= 0 else
+                                            self._app_log_level.findText(_DEFAULT_LOG_LEVEL))
+        self._app_log_dir_edit.setText(self._settings.value("log/app_log_dir", ""))
+
         theme = self._settings.value("appearance/theme", "System default")
         idx = self._theme_combo.findText(theme)
         if idx >= 0:
@@ -599,7 +662,13 @@ class PreferencesDialog(QDialog):
         self._settings.setValue("serial/default_port", self._port_combo.currentText())
         self._settings.setValue("serial/auto_connect", self._auto_connect.isChecked())
         self._settings.setValue("log/save_dir", self._log_path_edit.text())
+        self._settings.setValue("log/app_log_level", self._app_log_level.currentText())
+        self._settings.setValue("log/app_log_dir", self._app_log_dir_edit.text().strip())
         self._settings.setValue("appearance/theme", self._theme_combo.currentText())
+
+        # Log level can be applied live; directory changes need a restart
+        # because the file handler is bound at startup.
+        _apply_log_level(self._app_log_level.currentText())
 
         # Transcription
         self._settings.setValue("transcription/passthrough_enabled",

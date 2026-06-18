@@ -2,6 +2,15 @@
 
 ---
 
+## v1.3.0 — 2026-06-18
+
+### Diagnostic logging in the packaged binaries
+
+- **Added file-based logging to the binary builds**: the packaged Windows and macOS apps are built without a console, so all log output was previously discarded and the apps gave no way to diagnose problems in the field (e.g. silent daily-summary failures). NeoSCAN now always writes a rotating diagnostic log to a known location — `%LOCALAPPDATA%\NeoSCAN\Logs` on Windows, `~/Library/Logs/NeoSCAN` on macOS, and the XDG state directory on Linux (1 MB per file, 5 files retained)
+- **New Preferences → Logging controls**: configure the log level (DEBUG/INFO/WARNING/ERROR) and log directory, with an "Open" button to jump straight to the log folder. Level changes apply immediately; directory changes take effect on restart
+
+---
+
 ## v1.2.3 — 2026-06-13
 
 ### Windows dump1090 CLI compatibility
