@@ -2,6 +2,15 @@
 
 ---
 
+## v1.3.1 — 2026-06-19
+
+### Audio capture recovery after sleep/resume
+
+- **Fixed transcription silently dying after the machine sleeps**: the recorder keeps one audio input stream open persistently, but a system sleep/resume or USB re-enumeration could leave it as a dead stream that no longer delivered audio. Recording continued into the dead stream and every clip came back as "no audio" until the app was restarted. The recorder now detects a stream that has stopped delivering audio (via a callback heartbeat) and automatically reopens it on the next transmission, so capture self-heals
+- **Surfaced silent capture failures in the log**: "no audio captured" conditions are now logged at WARNING instead of DEBUG, so a stalled audio pipeline is visible in `neoscan.log` rather than looking like the app simply stopped logging
+
+---
+
 ## v1.3.0 — 2026-06-18
 
 ### Diagnostic logging in the packaged binaries
