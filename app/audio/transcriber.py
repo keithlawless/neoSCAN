@@ -323,7 +323,8 @@ class TranscriptionManager(QObject):
             return
         audio = self._recorder.stop_recording()
         if audio is None:
-            log.debug("TranscriptionManager: no audio captured for row %d", row_index)
+            log.warning("TranscriptionManager: no audio captured for row %d "
+                        "(recorder returned nothing)", row_index)
             self.transcription_ready.emit(row_index, "", None)
             return
         self._maybe_save_audio(audio, entry)

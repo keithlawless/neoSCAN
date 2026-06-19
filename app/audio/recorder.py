@@ -20,6 +20,10 @@ log = logging.getLogger(__name__)
 SAMPLE_RATE = 16_000       # Hz — Whisper's native sample rate
 MIN_DURATION_SEC = 1.0     # discard recordings shorter than this
 _NOISE_PROFILE_SECS = 2.0  # seconds of squelch audio used to build noise profile
+# A healthy input stream fires its callback continuously (even between
+# recordings). If no callback has arrived in this many seconds the stream is
+# considered dead — e.g. after a system sleep/resume or USB re-enumeration.
+_STREAM_STALE_SEC = 2.0
 
 
 class AudioRecorder:
@@ -58,6 +62,9 @@ class AudioRecorder:
         self._chunks: list[np.ndarray] = []
         self._lock = threading.Lock()
         self._recording = False
+        # monotonic timestamp of the most recent input callback; used to detect
+        # a stream that has silently stopped delivering audio (sleep/resume).
+        self._last_callback_ts: float = 0.0
 
         # Pass-through state
         self._passthrough: bool = False
@@ -125,18 +132,49 @@ class AudioRecorder:
         self._device_index = device_index
 
     def start_recording(self) -> None:
-        """Begin accumulating audio chunks. Opens the stream if not yet open."""
+        """Begin accumulating audio chunks. Opens (or reopens) the stream if
+        it is not currently live."""
         if self._device_index is None:
             return
         if self._recording:
             return
-        if self._stream is None:
+        # The stream is kept open persistently, but a system sleep/resume or a
+        # USB re-enumeration can leave it as a non-None but dead PortAudio
+        # stream that no longer delivers callbacks. Detect that and reopen so
+        # capture self-heals instead of silently returning "no audio" forever.
+        if not self._stream_is_live():
+            if self._stream is not None:
+                log.warning(
+                    "AudioRecorder: input stream is no longer live (likely "
+                    "system sleep/resume or device change) — reopening on "
+                    "device %s", self._device_index,
+                )
+                self._close_stream()
             if not self._open_stream():
                 return
         with self._lock:
             self._chunks = []
         self._recording = True
         log.debug("AudioRecorder: started on device %d", self._device_index)
+
+    def _stream_is_live(self) -> bool:
+        """True if the persistent input stream is open and still delivering audio.
+
+        The callback runs continuously while the stream is healthy (even
+        between recordings, as a no-op), so a stale ``_last_callback_ts`` is a
+        reliable signal that the audio thread has stopped. We also consult
+        ``.active``, which PortAudio clears when it aborts a stream on device
+        loss; any error reading it is treated as "not live" so we reopen
+        defensively.
+        """
+        if self._stream is None:
+            return False
+        try:
+            if not self._stream.active:
+                return False
+        except Exception:
+            return False
+        return (time.monotonic() - self._last_callback_ts) < _STREAM_STALE_SEC
 
     def stop_recording(self) -> Optional[np.ndarray]:
         """
@@ -155,6 +193,11 @@ class AudioRecorder:
             self._chunks = []
 
         if not chunks:
+            log.warning(
+                "AudioRecorder: no audio captured during recording — the input "
+                "stream stopped delivering audio (check for sleep/resume or a "
+                "device disconnect). It will be reopened on the next transmission."
+            )
             return None
 
         audio = np.concatenate(chunks, axis=0).flatten()
@@ -311,6 +354,9 @@ class AudioRecorder:
                 device=self._device_index,
                 callback=self._audio_callback,
             )
+            # Seed the liveness timestamp so the stream isn't judged stale in
+            # the window before its first callback fires.
+            self._last_callback_ts = time.monotonic()
             self._stream.start()
             log.debug("AudioRecorder: stream opened on device %d", self._device_index)
             return True
@@ -351,6 +397,9 @@ class AudioRecorder:
         status,
     ) -> None:
         """sounddevice input callback — runs on C audio thread."""
+        # Liveness heartbeat: a healthy stream fires this continuously, so
+        # start_recording() can tell a live stream from a dead one.
+        self._last_callback_ts = time.monotonic()
         if status:
             log.debug("AudioRecorder callback status: %s", status)
         if self._recording:
