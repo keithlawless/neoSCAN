@@ -2,6 +2,16 @@
 
 ---
 
+## v1.4.0 — 2026-06-19
+
+### Better transcription on real-world scanner audio
+
+- **More reliable transcription of quiet or transient-heavy audio**: replaced the old peak-based audio normalization, which a single full-scale spike (a key-up pop or static click) could defeat — leaving the actual speech buried and the clip returning "no audio". Clips are now normalized to a consistent loudness using a transient-robust reference level, with the rare over-level samples hard-limited, so quiet speech is brought up without one click ruining the gain
+- **Server-side voice-activity detection (VAD) is now optional and off by default**: scanner audio is already squelch-gated, and the whisper server's VAD was discarding quiet-but-real speech as "no audio". A new Preferences → Transcription → Whisper Server checkbox lets you re-enable it if you feed continuous (unsquelched) audio
+- **Per-radio audio input level meter**: each radio's Remote Control tab now shows a live line-level meter (dBFS scale with green / amber / red zones) for that radio's audio input, making it easy to set input levels correctly. The meter greys out to "no audio" when no audio is being captured
+
+---
+
 ## v1.3.1 — 2026-06-19
 
 ### Audio capture recovery after sleep/resume
