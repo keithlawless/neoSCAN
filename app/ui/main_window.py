@@ -638,6 +638,10 @@ class MainWindow(QMainWindow):
         # Add a ControlPanel tab for this radio.
         cp = ControlPanel(radio_label=label, parent=self)
         cp.set_protocol(proto)
+        # Feed the control panel's input-level meter from this radio's recorder,
+        # and open the input stream so the meter reads live even when idle.
+        cp.set_level_source(mgr)
+        mgr.start_audio_monitoring()
         self._radio_tabs.addTab(cp, label)
 
         # Update editor radio picker.
@@ -678,7 +682,12 @@ class MainWindow(QMainWindow):
         # Remove ControlPanel tab.
         for i in range(self._radio_tabs.count()):
             if self._radio_tabs.tabText(i) == radio.label:
+                cp = self._radio_tabs.widget(i)
+                if isinstance(cp, ControlPanel):
+                    cp.set_level_source(None)  # stop the level poll timer
                 self._radio_tabs.removeTab(i)
+                if cp is not None:
+                    cp.deleteLater()
                 break
 
         # Remove from picker.

@@ -41,6 +41,37 @@ _DEFAULT_LANGUAGE = DEFAULT_LANGUAGE
 _DEFAULT_SERVER_URL = "http://localhost:8000"
 _MAX_QUEUE_DEPTH = 10   # drop new jobs rather than let memory and latency grow unbounded
 _MAX_AUDIO_SECS = 60    # cap audio sent to server at this many seconds
+_DEFAULT_VAD = False    # scanner audio is already squelch-gated; VAD tends to drop real speech
+
+# Loudness normalization. The reference level is a high percentile of the
+# sample magnitude rather than the single peak or the RMS: a percentile ignores
+# rare transients (key-up pops, static clicks) that otherwise pin the gain and
+# leave real speech buried — the failure mode that produced ~50% "no audio".
+# We scale that reference to a target, then hard-clip the few transient samples
+# that exceed the ceiling instead of rescaling the whole clip back down.
+_NORM_PERCENTILE = 90    # reference = this percentile of |sample|
+_NORM_TARGET = 0.25      # map the reference to ~ -12 dBFS
+_LIMIT_PEAK = 0.97       # hard ceiling just below full scale
+_MAX_GAIN = 500.0        # cap so near-silent clips don't blow the noise floor up to full scale
+_SILENCE_REF = 1e-5      # below this the clip is effectively silent; leave it alone
+
+
+def _normalize_level(raw: np.ndarray) -> np.ndarray:
+    """Bring a clip to a consistent loudness, robust to transient clicks.
+
+    Uses a high-percentile reference (not peak or RMS) so a single full-scale
+    sample can't defeat the gain, then hard-clips any transients above the
+    ceiling. Returns float32.
+    """
+    if raw.size == 0:
+        return raw
+    ref = float(np.percentile(np.abs(raw), _NORM_PERCENTILE))
+    if ref < _SILENCE_REF:
+        return raw  # essentially silent — amplifying would only raise the noise floor
+    gain = min(_NORM_TARGET / ref, _MAX_GAIN)
+    out = (raw * gain).astype(np.float32, copy=False)
+    np.clip(out, -_LIMIT_PEAK, _LIMIT_PEAK, out=out)
+    return out
 
 _MULTIPART_BOUNDARY = b"NeoSCANBoundary"
 
@@ -81,12 +112,14 @@ class TranscriberWorker(QThread):
         server_url: str,
         model_size: str,
         language: Optional[str] = _DEFAULT_LANGUAGE,
+        vad: bool = _DEFAULT_VAD,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._server_url = server_url.rstrip("/")
         self._model_size = model_size
         self._language: Optional[str] = language
+        self._vad = vad
         self._queue: list[_TranscriptionJob] = []
         self._mutex = QMutex()
         self._cond = QWaitCondition()
@@ -95,6 +128,10 @@ class TranscriberWorker(QThread):
     def set_language(self, language: Optional[str]) -> None:
         """Update the transcription language. Takes effect on the next job."""
         self._language = language
+
+    def set_vad(self, enabled: bool) -> None:
+        """Enable/disable server-side voice-activity detection. Next job."""
+        self._vad = enabled
 
     def enqueue(self, job: _TranscriptionJob) -> None:
         with QMutexLocker(self._mutex):
@@ -143,9 +180,10 @@ class TranscriberWorker(QThread):
                     job.row_index, peak,
                 )
 
-            # Normalize peak so the server's VAD always sees adequate signal
-            # regardless of input gain or system type.
-            normalized = raw / peak if peak > 0.0 else raw
+            # Normalize so the server sees a consistent loudness regardless of
+            # input gain, without a single transient click defeating the gain
+            # (which max-peak normalization suffered from).
+            normalized = _normalize_level(raw)
 
             # Cap audio at _MAX_AUDIO_SECS so server latency and queue drain stay bounded.
             max_samples = int(_MAX_AUDIO_SECS * SAMPLE_RATE)
@@ -165,7 +203,7 @@ class TranscriberWorker(QThread):
                 + audio_bytes + b"\r\n"
                 + _multipart_field("format", "raw_f32_16k")
                 + _multipart_field("model", self._model_size)
-                + _multipart_field("vad", "true")
+                + _multipart_field("vad", "true" if self._vad else "false")
                 + (_multipart_field("language", self._language) if self._language else b"")
                 + b"--" + _MULTIPART_BOUNDARY + b"--\r\n"
             )
@@ -242,6 +280,7 @@ class TranscriptionManager(QObject):
         self._server_url = _DEFAULT_SERVER_URL
         self._current_model_size = ""
         self._current_language: Optional[str] = _DEFAULT_LANGUAGE
+        self._current_vad = _DEFAULT_VAD
         self._radio_label = radio_label
         if device_index is not None:
             self._recorder.set_device(device_index)
@@ -276,6 +315,12 @@ class TranscriptionManager(QObject):
             if self._worker is not None:
                 self._worker.set_language(language)
 
+        vad = settings.value("transcription/vad_enabled", _DEFAULT_VAD, type=bool)
+        if vad != self._current_vad:
+            self._current_vad = vad
+            if self._worker is not None:
+                self._worker.set_vad(vad)
+
         global_enabled = settings.value("transcription/enabled", True, type=bool)
         self._enabled = self._per_radio_enabled and global_enabled
 
@@ -308,6 +353,21 @@ class TranscriptionManager(QObject):
     def recapture_noise_profile(self) -> None:
         """Discard the pass-through noise profile and capture a fresh one."""
         self._recorder.recapture_noise_profile()
+
+    # --- Level meter support (driven by the per-radio control panel) ---
+
+    def start_audio_monitoring(self) -> bool:
+        """Open the input stream so the level meter reads live audio even when
+        no transmission is in progress. No-op without an input device."""
+        return self._recorder.start_monitoring()
+
+    def current_audio_level(self) -> float:
+        """Most recent input level in [0, 1] for the meter."""
+        return self._recorder.current_level()
+
+    def is_capturing_audio(self) -> bool:
+        """True while the input stream is delivering audio (meter active)."""
+        return self._recorder.is_capturing_audio()
 
     def on_transmission_started(self) -> None:
         if not self._enabled:
@@ -405,6 +465,7 @@ class TranscriptionManager(QObject):
             self._server_url,
             self._current_model_size,
             language=self._current_language,
+            vad=self._current_vad,
             parent=self,
         )
         self._worker.transcription_ready.connect(self._on_worker_transcription_ready)

@@ -4,6 +4,7 @@ Remote control panel — virtual scanner keypad + live display.
 from __future__ import annotations
 
 import logging
+import math
 
 from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter
@@ -108,6 +109,94 @@ class _ScrollingLabel(QWidget):
         return QSize(200, fm.height() + 10)
 
 
+class _LevelMeter(QWidget):
+    """Horizontal audio input level meter on a dBFS scale.
+
+    Shows the live line level from a radio's audio input with green/amber/red
+    zones (green = healthy, red = approaching clipping). Renders a flat grey
+    "no audio" bar when the input stream isn't delivering audio.
+    """
+
+    _DB_MIN = -54.0          # bottom of the visible scale
+    _DB_GREEN_TOP = -12.0    # green below this
+    _DB_AMBER_TOP = -3.0     # amber below this, red above
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._level = 0.0      # smoothed display level, fraction 0..1 of scale
+        self._active = False
+        self.setMinimumHeight(18)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def set_active(self, active: bool) -> None:
+        if active != self._active:
+            self._active = active
+            if not active:
+                self._level = 0.0
+            self.update()
+
+    def set_level(self, level: float) -> None:
+        """Set the current input level (linear 0..1); converted to a dB scale."""
+        frac = self._level_to_frac(level)
+        # Mild smoothing so the bar reads steadily rather than flickering.
+        self._level = frac if frac >= self._level else self._level * 0.6 + frac * 0.4
+        if self._active:
+            self.update()
+
+    @classmethod
+    def _level_to_frac(cls, level: float) -> float:
+        if level <= 1e-6:
+            return 0.0
+        db = 20.0 * math.log10(min(level, 1.0))
+        if db <= cls._DB_MIN:
+            return 0.0
+        return (db - cls._DB_MIN) / (0.0 - cls._DB_MIN)
+
+    @classmethod
+    def _db_frac(cls, db: float) -> float:
+        return (db - cls._DB_MIN) / (0.0 - cls._DB_MIN)
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        rect = self.rect().adjusted(0, 0, -1, -1)
+        p.fillRect(rect, QColor("#101010"))
+
+        if not self._active:
+            p.setPen(QColor("#555"))
+            p.drawRect(rect)
+            p.setPen(QColor("#777"))
+            p.drawText(rect, Qt.AlignmentFlag.AlignCenter, "no audio")
+            p.end()
+            return
+
+        w = rect.width()
+        h = rect.height()
+        filled = int(w * self._level)
+        green_end = int(w * self._db_frac(self._DB_GREEN_TOP))
+        amber_end = int(w * self._db_frac(self._DB_AMBER_TOP))
+
+        for start, end, color in (
+            (0, green_end, QColor("#2ecc40")),
+            (green_end, amber_end, QColor("#ffcc00")),
+            (amber_end, w, QColor("#ff4136")),
+        ):
+            seg_end = min(filled, end)
+            if seg_end > start:
+                p.fillRect(rect.left() + start, rect.top(),
+                           seg_end - start, h, color)
+
+        # Tick at the clip threshold (-3 dB).
+        p.setPen(QColor("#888"))
+        p.drawLine(rect.left() + amber_end, rect.top(),
+                   rect.left() + amber_end, rect.top() + h)
+        p.setPen(QColor("#444"))
+        p.drawRect(rect)
+        p.end()
+
+    def sizeHint(self) -> QSize:
+        return QSize(180, 18)
+
+
 # Number pad keys: (label, key_code)
 _NUM_KEYS = [
     ("1","1"), ("2","2"), ("3","3"),
@@ -145,7 +234,13 @@ class ControlPanel(QWidget):
         super().__init__(parent)
         self.radio_label = radio_label
         self._proto: ScannerProtocol | None = None
+        self._level_source = None
         self._build_ui()
+
+        # Poll this radio's audio input level for the meter (~20 fps).
+        self._level_timer = QTimer(self)
+        self._level_timer.setInterval(50)
+        self._level_timer.timeout.connect(self._poll_level)
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -227,6 +322,17 @@ class ControlPanel(QWidget):
             value_fmt=self._sql_fmt,
         )
         layout.addWidget(vs_group)
+
+        # ── Audio input level ────────────────────────────────────────────
+        audio_group = QGroupBox("Audio Input Level")
+        audio_layout = QVBoxLayout(audio_group)
+        self._level_meter = _LevelMeter()
+        audio_layout.addWidget(self._level_meter)
+        hint = QLabel("Line level from this radio's audio input (for transcription).")
+        hint.setStyleSheet("color: gray; font-size: 11px;")
+        hint.setWordWrap(True)
+        audio_layout.addWidget(hint)
+        layout.addWidget(audio_group)
 
         layout.addStretch()
 
@@ -348,6 +454,27 @@ class ControlPanel(QWidget):
         self._display_bottom.setText(
             "  ".join(filter(None, [sys_name, grp_name, freq_str if ch_name else ""]))
         )
+
+    def set_level_source(self, source) -> None:
+        """Attach the audio source (a TranscriptionManager) whose input level
+        feeds the meter. `source` exposes current_audio_level() and
+        is_capturing_audio(). Pass None to detach."""
+        self._level_source = source
+        if source is not None:
+            self._level_timer.start()
+        else:
+            self._level_timer.stop()
+            self._level_meter.set_active(False)
+
+    def _poll_level(self) -> None:
+        src = self._level_source
+        if src is None:
+            self._level_meter.set_active(False)
+            return
+        active = src.is_capturing_audio()
+        self._level_meter.set_active(active)
+        if active:
+            self._level_meter.set_level(src.current_audio_level())
 
     def _send_key(self, key_code: str) -> None:
         if not self._proto:

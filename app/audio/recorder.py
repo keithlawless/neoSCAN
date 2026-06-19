@@ -65,6 +65,9 @@ class AudioRecorder:
         # monotonic timestamp of the most recent input callback; used to detect
         # a stream that has silently stopped delivering audio (sleep/resume).
         self._last_callback_ts: float = 0.0
+        # smoothed input level in [0, 1] (peak with fast attack / slow decay),
+        # updated on every callback; drives the control-panel level meter.
+        self._level: float = 0.0
 
         # Pass-through state
         self._passthrough: bool = False
@@ -156,6 +159,32 @@ class AudioRecorder:
             self._chunks = []
         self._recording = True
         log.debug("AudioRecorder: started on device %d", self._device_index)
+
+    def start_monitoring(self) -> bool:
+        """Open the input stream (if not already live) so input levels and
+        pass-through flow continuously without recording.
+
+        Used to drive the live level meter while a radio is connected. No-op
+        when no input device is configured. Safe to call repeatedly.
+        """
+        if self._device_index is None:
+            return False
+        if self._stream_is_live():
+            return True
+        if self._stream is not None:
+            self._close_stream()
+        return self._open_stream()
+
+    def current_level(self) -> float:
+        """Most recent smoothed input level in [0, 1]. Returns 0 when the
+        stream is not delivering audio, so the meter reads empty."""
+        if not self._stream_is_live():
+            return 0.0
+        return self._level
+
+    def is_capturing_audio(self) -> bool:
+        """True if the input stream is open and actively delivering callbacks."""
+        return self._stream_is_live()
 
     def _stream_is_live(self) -> bool:
         """True if the persistent input stream is open and still delivering audio.
@@ -400,6 +429,13 @@ class AudioRecorder:
         # Liveness heartbeat: a healthy stream fires this continuously, so
         # start_recording() can tell a live stream from a dead one.
         self._last_callback_ts = time.monotonic()
+        # Track input level for the meter (peak with fast attack / slow decay).
+        if indata.size:
+            block_peak = float(np.max(np.abs(indata)))
+            if block_peak >= self._level:
+                self._level = block_peak
+            else:
+                self._level += (block_peak - self._level) * 0.2
         if status:
             log.debug("AudioRecorder callback status: %s", status)
         if self._recording:
