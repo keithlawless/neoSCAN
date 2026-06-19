@@ -288,6 +288,15 @@ class PreferencesDialog(QDialog):
             self._tx_lang_combo.addItem(name, code)
         tx_form.addRow("Language:", self._tx_lang_combo)
 
+        self._vad_enable = QCheckBox("Server-side voice-activity detection (VAD)")
+        self._vad_enable.setToolTip(
+            "Let the whisper server pre-filter audio with VAD before transcribing.\n"
+            "Scanner audio is already squelch-gated, and VAD tends to drop real\n"
+            "but quiet/noisy speech as \"no audio\". Leave off unless you are\n"
+            "feeding continuous (unsquelched) audio."
+        )
+        tx_form.addRow("", self._vad_enable)
+
         tx_dir_row = QHBoxLayout()
         self._tx_dir_edit = QLineEdit()
         self._tx_dir_edit.setPlaceholderText(
@@ -619,6 +628,9 @@ class PreferencesDialog(QDialog):
                 self._tx_lang_combo.setCurrentIndex(i)
                 break
 
+        vad_enabled = self._settings.value("transcription/vad_enabled", False, type=bool)
+        self._vad_enable.setChecked(vad_enabled)
+
         tx_dir = self._settings.value("transcription/transcript_dir", "")
         self._tx_dir_edit.setText(tx_dir)
 
@@ -681,6 +693,7 @@ class PreferencesDialog(QDialog):
                                 self._tx_model_combo.currentText())
         self._settings.setValue("transcription/language",
                                 self._tx_lang_combo.currentData())
+        self._settings.setValue("transcription/vad_enabled", self._vad_enable.isChecked())
         self._settings.setValue("transcription/transcript_dir", self._tx_dir_edit.text())
         self._settings.setValue("transcription/retain_audio", self._retain_audio_check.isChecked())
         self._settings.setValue("transcription/audio_save_dir", self._audio_dir_edit.text())
