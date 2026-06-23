@@ -59,6 +59,13 @@ class AudioRecorder:
     def __init__(self) -> None:
         self._device_index: Optional[int] = None
         self._stream = None
+        # Number of input channels the stream is opened with. Many USB cards
+        # expose two input channels even when only one carries the line signal,
+        # so we capture all of them and reduce to a single live channel.
+        self._channels: int = 1
+        # Slow per-channel energy estimate used to pick the channel that
+        # actually carries audio (a dead/unconnected channel is ignored).
+        self._ch_energy: Optional[np.ndarray] = None
         self._chunks: list[np.ndarray] = []
         self._lock = threading.Lock()
         self._recording = False
@@ -376,9 +383,18 @@ class AudioRecorder:
         """Open and start the persistent input stream. Returns True on success."""
         try:
             import sounddevice as sd  # deferred — optional dependency
+            # Capture up to two input channels. USB cards often present the
+            # line input as one channel of a stereo pair (the other dead), so
+            # we open the pair and pick the live channel in _to_mono().
+            try:
+                max_in = int(sd.query_devices(self._device_index)["max_input_channels"])
+            except Exception:
+                max_in = 1
+            self._channels = min(2, max(1, max_in))
+            self._ch_energy = None
             self._stream = sd.InputStream(
                 samplerate=SAMPLE_RATE,
-                channels=1,
+                channels=self._channels,
                 dtype="float32",
                 device=self._device_index,
                 callback=self._audio_callback,
@@ -387,7 +403,8 @@ class AudioRecorder:
             # the window before its first callback fires.
             self._last_callback_ts = time.monotonic()
             self._stream.start()
-            log.debug("AudioRecorder: stream opened on device %d", self._device_index)
+            log.debug("AudioRecorder: stream opened on device %d (%d ch)",
+                      self._device_index, self._channels)
             return True
         except Exception as exc:
             self._stream = None
@@ -418,6 +435,30 @@ class AudioRecorder:
     # Private — callbacks
     # ------------------------------------------------------------------
 
+    def _to_mono(self, indata: np.ndarray) -> np.ndarray:
+        """Reduce a capture block to one DC-blocked mono channel (1-D float32).
+
+        Removes each channel's DC bias — USB line inputs often carry a large
+        constant offset that otherwise pins the level meter and defeats
+        silence detection — then, for a multi-channel device, selects the
+        channel with the most recent signal energy so a dead/unconnected
+        channel is ignored instead of mixed in.
+        """
+        block = indata.astype(np.float32, copy=True)
+        if block.ndim == 1:
+            return block - float(block.mean())
+        # DC-block every channel (column-wise mean removal).
+        block = block - block.mean(axis=0, keepdims=True)
+        if block.shape[1] == 1:
+            return block[:, 0]
+        # Slowly track per-channel energy and emit the liveliest channel.
+        energies = np.sqrt(np.mean(block ** 2, axis=0))
+        if self._ch_energy is None or self._ch_energy.shape[0] != energies.shape[0]:
+            self._ch_energy = energies.copy()
+        else:
+            self._ch_energy += (energies - self._ch_energy) * 0.1
+        return block[:, int(np.argmax(self._ch_energy))]
+
     def _audio_callback(
         self,
         indata: np.ndarray,
@@ -429,9 +470,12 @@ class AudioRecorder:
         # Liveness heartbeat: a healthy stream fires this continuously, so
         # start_recording() can tell a live stream from a dead one.
         self._last_callback_ts = time.monotonic()
+        mono = self._to_mono(indata) if indata.size else indata
         # Track input level for the meter (peak with fast attack / slow decay).
-        if indata.size:
-            block_peak = float(np.max(np.abs(indata)))
+        # Measured on the DC-blocked mono signal so a constant input bias no
+        # longer holds the meter off zero when nothing is being received.
+        if mono.size:
+            block_peak = float(np.max(np.abs(mono)))
             if block_peak >= self._level:
                 self._level = block_peak
             else:
@@ -440,9 +484,9 @@ class AudioRecorder:
             log.debug("AudioRecorder callback status: %s", status)
         if self._recording:
             with self._lock:
-                self._chunks.append(indata.copy())
+                self._chunks.append(mono.copy())
         if self._passthrough:
-            self._pt_raw_buffer.append(indata.copy())
+            self._pt_raw_buffer.append(mono.copy())
 
     def _output_callback(
         self,

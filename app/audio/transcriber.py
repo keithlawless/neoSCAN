@@ -52,24 +52,57 @@ _DEFAULT_VAD = False    # scanner audio is already squelch-gated; VAD tends to d
 _NORM_PERCENTILE = 90    # reference = this percentile of |sample|
 _NORM_TARGET = 0.25      # map the reference to ~ -12 dBFS
 _LIMIT_PEAK = 0.97       # hard ceiling just below full scale
-_MAX_GAIN = 500.0        # cap so near-silent clips don't blow the noise floor up to full scale
-_SILENCE_REF = 1e-5      # below this the clip is effectively silent; leave it alone
+_MAX_GAIN = 100.0        # cap on boost; a clean line input never needs more, and
+                         # the speech guard below already rejects dead/quiet clips
+_SILENCE_REF = 1e-4      # below this the clip is effectively silent; leave it alone
+
+# Speech-presence guard. A real transmission has a fluctuating envelope (loud
+# words, quiet gaps); a hum, steady tone, or DC offset has a near-constant
+# envelope. We frame the DC-blocked signal and compare the loudest frame to the
+# median frame — a flat envelope means no speech, so we skip transcription
+# rather than let the server hallucinate "Thank you" on a dead input.
+_SPEECH_FRAME = 480           # ~30 ms at 16 kHz
+_SPEECH_DYNAMIC_RATIO = 2.0   # max-frame / median-frame RMS below this = no speech
+_SPEECH_MIN_PEAK = 5e-4       # below this (after DC removal) the clip is silent
+
+
+def _has_speech(raw: np.ndarray) -> bool:
+    """True if the clip looks like speech rather than steady noise/DC.
+
+    Heuristic on the short-time envelope: speech swings between loud and quiet
+    frames; a constant input (hum, tone, DC bias) does not. Clips too short to
+    judge are allowed through.
+    """
+    if raw.size < _SPEECH_FRAME * 2:
+        return True
+    x = raw.astype(np.float32, copy=False)
+    x = x - float(x.mean())
+    if float(np.max(np.abs(x))) < _SPEECH_MIN_PEAK:
+        return False
+    n = (x.size // _SPEECH_FRAME) * _SPEECH_FRAME
+    frame_rms = np.sqrt(np.mean(x[:n].reshape(-1, _SPEECH_FRAME) ** 2, axis=1))
+    med = float(np.median(frame_rms))
+    if med < 1e-9:
+        return True  # near-silent with isolated bursts — treat as real speech onset
+    return (float(np.max(frame_rms)) / med) >= _SPEECH_DYNAMIC_RATIO
 
 
 def _normalize_level(raw: np.ndarray) -> np.ndarray:
     """Bring a clip to a consistent loudness, robust to transient clicks.
 
-    Uses a high-percentile reference (not peak or RMS) so a single full-scale
-    sample can't defeat the gain, then hard-clips any transients above the
-    ceiling. Returns float32.
+    Removes any DC bias, then uses a high-percentile reference (not peak or
+    RMS) so a single full-scale sample can't defeat the gain, then hard-clips
+    any transients above the ceiling. Returns float32.
     """
     if raw.size == 0:
         return raw
-    ref = float(np.percentile(np.abs(raw), _NORM_PERCENTILE))
+    out = raw.astype(np.float32, copy=True)
+    out -= float(out.mean())  # strip DC so the gain reference reflects real audio
+    ref = float(np.percentile(np.abs(out), _NORM_PERCENTILE))
     if ref < _SILENCE_REF:
-        return raw  # essentially silent — amplifying would only raise the noise floor
+        return out  # essentially silent — amplifying would only raise the noise floor
     gain = min(_NORM_TARGET / ref, _MAX_GAIN)
-    out = (raw * gain).astype(np.float32, copy=False)
+    out *= gain
     np.clip(out, -_LIMIT_PEAK, _LIMIT_PEAK, out=out)
     return out
 
@@ -179,6 +212,17 @@ class TranscriberWorker(QThread):
                     "check input device gain and cable connection",
                     job.row_index, peak,
                 )
+
+            # Reject clips with no speech dynamics (steady hum/tone/DC offset)
+            # before they reach the server, where amplified noise reliably
+            # transcribes as a "Thank you"-style hallucination.
+            if not _has_speech(raw):
+                log.info(
+                    "Transcription row %d: no speech detected (flat envelope, "
+                    "peak=%.4f) — skipping", job.row_index, peak,
+                )
+                self.transcription_ready.emit(job.row_index, "", job)
+                return
 
             # Normalize so the server sees a consistent loudness regardless of
             # input gain, without a single transient click defeating the gain
