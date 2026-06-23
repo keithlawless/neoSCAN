@@ -52,24 +52,147 @@ _DEFAULT_VAD = False    # scanner audio is already squelch-gated; VAD tends to d
 _NORM_PERCENTILE = 90    # reference = this percentile of |sample|
 _NORM_TARGET = 0.25      # map the reference to ~ -12 dBFS
 _LIMIT_PEAK = 0.97       # hard ceiling just below full scale
-_MAX_GAIN = 500.0        # cap so near-silent clips don't blow the noise floor up to full scale
-_SILENCE_REF = 1e-5      # below this the clip is effectively silent; leave it alone
+_MAX_GAIN = 100.0        # cap on boost; a clean line input never needs more, and
+                         # the speech guard below already rejects dead/quiet clips
+_SILENCE_REF = 1e-4      # below this the clip is effectively silent; leave it alone
+
+# Speech-presence guard. A real transmission has a fluctuating envelope (loud
+# words, quiet gaps); a hum, steady tone, or DC offset has a near-constant
+# envelope. We frame the DC-blocked signal and compare the loudest frame to the
+# median frame — a flat envelope means no speech, so we skip transcription
+# rather than let the server hallucinate "Thank you" on a dead input.
+_SPEECH_FRAME = 480           # ~30 ms at 16 kHz
+_SPEECH_DYNAMIC_RATIO = 2.0   # max-frame / median-frame RMS below this = no speech
+_SPEECH_MIN_PEAK = 1e-2       # ~-40 dBFS. Below this the clip is at the noise
+                              # floor (DC-blocked idle is ~2e-4) — real speech
+                              # peaks at 0.1-1.0, so this rejects squelch tails
+                              # and dead key-ups that otherwise hallucinate.
+
+# Output-side hallucination filter. The envelope guard above rejects flat/quiet
+# clips, but static and squelch noise with healthy peaks and natural envelope
+# variation still pass it, and Whisper transcribes that low-information audio as
+# canonical training-set filler ("Thank you", "Thanks for watching"). These
+# never carry real information, so we drop them after the server responds.
+#
+# Phrases are stored already-normalized (see _normalize_phrase): lowercase, no
+# surrounding punctuation, single-spaced. A transmission whose *entire* content
+# reduces to one of these is suppressed; a clip that merely contains "thank you"
+# inside a longer utterance is kept.
+_HALLUCINATION_PHRASES = frozenset({
+    "",
+    "you",
+    "bye",
+    "thank you",
+    "thank you very much",
+    "thank you so much",
+    "thank you for watching",
+    "thanks for watching",
+    "thank you for watching this video",
+    "thanks for watching this video",
+    "please subscribe",
+    "like and subscribe",
+    "please like and subscribe",
+    "subscribe to my channel",
+    "see you next time",
+    "see you in the next video",
+    "i'll see you next time",
+})
+_NO_SPEECH_PROB_DROP = 0.85   # if every segment is this confident there is no
+                              # speech, drop the result. Conservative: genuine
+                              # speech sits far below this, so real audio is
+                              # never suppressed by this gate.
+_REPEAT_DROP_COUNT = 3        # a single sentence repeated this many times is a
+                              # Whisper decode loop, not a real transmission.
+_PUNCT_RE = re.compile(r"[^\w\s']+")
+_SENTENCE_SPLIT_RE = re.compile(r"[.!?]+")
+
+
+def _normalize_phrase(text: str) -> str:
+    """Lowercase, drop surrounding punctuation, collapse whitespace."""
+    text = _PUNCT_RE.sub(" ", text.lower())
+    return " ".join(text.split())
+
+
+def _filter_hallucination(text: str, segments: list) -> str:
+    """Return text, or "" if it looks like a Whisper hallucination on noise.
+
+    Three independent signals, any of which suppresses the clip:
+      * every segment reports near-certain no-speech (`no_speech_prob`);
+      * the transcript is one short sentence repeated in a decode loop;
+      * the whole transcript reduces to a known filler phrase.
+    A real utterance that merely *contains* "thank you" is preserved.
+    """
+    text = text.strip()
+    if not text:
+        return ""
+
+    # No word characters at all — "!", "...", "! ! !". Pure punctuation Whisper
+    # emits on noise; carries no information regardless of the phrase rules below.
+    if not _normalize_phrase(text):
+        return ""
+
+    # Whisper's own no-speech confidence. Only acts when *all* segments agree, so
+    # a single real word anywhere in the clip keeps it.
+    if segments:
+        probs = [float(s.get("no_speech_prob") or 0.0) for s in segments]
+        if probs and min(probs) >= _NO_SPEECH_PROB_DROP:
+            return ""
+
+    sentences = [
+        _normalize_phrase(s) for s in _SENTENCE_SPLIT_RE.split(text) if s.strip()
+    ]
+    unique = set(sentences)
+
+    # Decode loop: the same sentence over and over (e.g. "I'm going to take a
+    # break." x6). Real speech does not repeat one sentence verbatim this often.
+    if len(unique) == 1 and len(sentences) >= _REPEAT_DROP_COUNT:
+        return ""
+
+    # Whole transcript is nothing but filler. Covers "Thank you.",
+    # "Thanks for watching!", and "Thank you. Thank you." (one unique sentence).
+    if unique and unique <= _HALLUCINATION_PHRASES:
+        return ""
+
+    return text
+
+
+def _has_speech(raw: np.ndarray) -> bool:
+    """True if the clip looks like speech rather than steady noise/DC.
+
+    Heuristic on the short-time envelope: speech swings between loud and quiet
+    frames; a constant input (hum, tone, DC bias) does not. Clips too short to
+    judge are allowed through.
+    """
+    if raw.size < _SPEECH_FRAME * 2:
+        return True
+    x = raw.astype(np.float32, copy=False)
+    x = x - float(x.mean())
+    if float(np.max(np.abs(x))) < _SPEECH_MIN_PEAK:
+        return False
+    n = (x.size // _SPEECH_FRAME) * _SPEECH_FRAME
+    frame_rms = np.sqrt(np.mean(x[:n].reshape(-1, _SPEECH_FRAME) ** 2, axis=1))
+    med = float(np.median(frame_rms))
+    if med < 1e-9:
+        return True  # near-silent with isolated bursts — treat as real speech onset
+    return (float(np.max(frame_rms)) / med) >= _SPEECH_DYNAMIC_RATIO
 
 
 def _normalize_level(raw: np.ndarray) -> np.ndarray:
     """Bring a clip to a consistent loudness, robust to transient clicks.
 
-    Uses a high-percentile reference (not peak or RMS) so a single full-scale
-    sample can't defeat the gain, then hard-clips any transients above the
-    ceiling. Returns float32.
+    Removes any DC bias, then uses a high-percentile reference (not peak or
+    RMS) so a single full-scale sample can't defeat the gain, then hard-clips
+    any transients above the ceiling. Returns float32.
     """
     if raw.size == 0:
         return raw
-    ref = float(np.percentile(np.abs(raw), _NORM_PERCENTILE))
+    out = raw.astype(np.float32, copy=True)
+    out -= float(out.mean())  # strip DC so the gain reference reflects real audio
+    ref = float(np.percentile(np.abs(out), _NORM_PERCENTILE))
     if ref < _SILENCE_REF:
-        return raw  # essentially silent — amplifying would only raise the noise floor
+        return out  # essentially silent — amplifying would only raise the noise floor
     gain = min(_NORM_TARGET / ref, _MAX_GAIN)
-    out = (raw * gain).astype(np.float32, copy=False)
+    out *= gain
     np.clip(out, -_LIMIT_PEAK, _LIMIT_PEAK, out=out)
     return out
 
@@ -180,6 +303,17 @@ class TranscriberWorker(QThread):
                     job.row_index, peak,
                 )
 
+            # Reject clips with no speech dynamics (steady hum/tone/DC offset)
+            # before they reach the server, where amplified noise reliably
+            # transcribes as a "Thank you"-style hallucination.
+            if not _has_speech(raw):
+                log.info(
+                    "Transcription row %d: no speech detected (flat envelope, "
+                    "peak=%.4f) — skipping", job.row_index, peak,
+                )
+                self.transcription_ready.emit(job.row_index, "", job)
+                return
+
             # Normalize so the server sees a consistent loudness regardless of
             # input gain, without a single transient click defeating the gain
             # (which max-peak normalization suffered from).
@@ -219,16 +353,27 @@ class TranscriberWorker(QThread):
             with urllib.request.urlopen(req, timeout=90) as resp:
                 result = json.loads(resp.read())
 
-            for seg in result.get("segments", []):
+            segments = result.get("segments", [])
+            for seg in segments:
                 log.debug(
                     "  row %d seg [%.1f-%.1fs] no_speech_prob=%.3f %r",
                     job.row_index, seg["start"], seg["end"],
                     seg.get("no_speech_prob") or 0.0, seg["text"][:80],
                 )
             text = result.get("text", "").strip()
-            if text:
+            suppressed = _filter_hallucination(text, segments)
+            if suppressed != text:
+                log.info(
+                    "Transcription row %d: suppressed likely hallucination %r "
+                    "(noise/static clip, peak=%.4f)",
+                    job.row_index, text[:200], peak,
+                )
+                text = suppressed
+            elif text:
                 log.info("Transcription row %d: %r", job.row_index, text[:200])
             else:
+                # Server itself returned nothing — distinct from a clip we
+                # suppressed — so the cable/gain hint is still worth surfacing.
                 log.warning(
                     "Transcription row %d: server returned empty text for %.1fs of audio — "
                     "check scanner audio cable, input device, and volume.",
