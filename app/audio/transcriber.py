@@ -63,7 +63,10 @@ _SILENCE_REF = 1e-4      # below this the clip is effectively silent; leave it a
 # rather than let the server hallucinate "Thank you" on a dead input.
 _SPEECH_FRAME = 480           # ~30 ms at 16 kHz
 _SPEECH_DYNAMIC_RATIO = 2.0   # max-frame / median-frame RMS below this = no speech
-_SPEECH_MIN_PEAK = 5e-4       # below this (after DC removal) the clip is silent
+_SPEECH_MIN_PEAK = 1e-2       # ~-40 dBFS. Below this the clip is at the noise
+                              # floor (DC-blocked idle is ~2e-4) — real speech
+                              # peaks at 0.1-1.0, so this rejects squelch tails
+                              # and dead key-ups that otherwise hallucinate.
 
 
 def _has_speech(raw: np.ndarray) -> bool:
