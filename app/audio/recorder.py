@@ -17,13 +17,40 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-SAMPLE_RATE = 16_000       # Hz — Whisper's native sample rate
+SAMPLE_RATE = 16_000       # Hz — Whisper's native sample rate; output of the
+                           # capture pipeline after resampling
 MIN_DURATION_SEC = 1.0     # discard recordings shorter than this
 _NOISE_PROFILE_SECS = 2.0  # seconds of squelch audio used to build noise profile
 # A healthy input stream fires its callback continuously (even between
 # recordings). If no callback has arrived in this many seconds the stream is
 # considered dead — e.g. after a system sleep/resume or USB re-enumeration.
 _STREAM_STALE_SEC = 2.0
+
+
+def _resample(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+    """Resample 1-D float32 audio from src_rate to dst_rate.
+
+    Uses scipy's polyphase resampler (anti-aliased) when available, falling
+    back to numpy linear interpolation otherwise. Capturing at the device's
+    native rate and resampling here — rather than asking the input stream for
+    16 kHz directly — avoids the garbled/aliased audio that cheap USB capture
+    dongles produce when forced to a sample rate their hardware doesn't truly
+    support (they advertise it but resample badly or not at all).
+    """
+    if audio.size == 0 or src_rate == dst_rate:
+        return audio.astype(np.float32, copy=False)
+    try:
+        from math import gcd
+        from scipy.signal import resample_poly
+        g = gcd(int(src_rate), int(dst_rate))
+        return resample_poly(audio, dst_rate // g, src_rate // g).astype(np.float32)
+    except Exception:
+        n_out = int(round(audio.size * dst_rate / src_rate))
+        if n_out <= 0:
+            return np.zeros(0, dtype=np.float32)
+        x_old = np.linspace(0.0, 1.0, num=audio.size, endpoint=False)
+        x_new = np.linspace(0.0, 1.0, num=n_out, endpoint=False)
+        return np.interp(x_new, x_old, audio).astype(np.float32)
 
 
 class AudioRecorder:
@@ -47,8 +74,14 @@ class AudioRecorder:
     case is one extra chunk appended after stop_recording() returns, which is
     harmless because we take a snapshot of _chunks under the lock.
 
+    The input stream is opened at the device's native sample rate and audio is
+    resampled to SAMPLE_RATE (16 kHz) before leaving the recorder — recordings
+    in stop_recording(), pass-through chunks in the processing thread. Forcing
+    the stream to 16 kHz instead produced garbled audio on USB capture dongles
+    that don't truly support that rate.
+
     Pass-through pipeline:
-        input callback → _pt_raw_buffer → processing thread (NR) → _pt_out_buffer → output callback
+        input callback → _pt_raw_buffer → processing thread (resample + NR) → _pt_out_buffer → output callback
 
     The processing thread accumulates the first _NOISE_PROFILE_SECS of audio
     as a noise profile, then applies noisereduce per-chunk.  Audio passes
@@ -63,6 +96,10 @@ class AudioRecorder:
         # expose two input channels even when only one carries the line signal,
         # so we capture all of them and reduce to a single live channel.
         self._channels: int = 1
+        # Sample rate the input stream is actually opened at — the device's
+        # native/default rate. Captured audio is resampled to SAMPLE_RATE
+        # (16 kHz) before it leaves the recorder.
+        self._capture_rate: int = SAMPLE_RATE
         # Slow per-channel energy estimate used to pick the channel that
         # actually carries audio (a dead/unconnected channel is ignored).
         self._ch_energy: Optional[np.ndarray] = None
@@ -237,12 +274,16 @@ class AudioRecorder:
             return None
 
         audio = np.concatenate(chunks, axis=0).flatten()
+        # Resample the whole clip at once (cleaner than per-block) from the
+        # device's native capture rate down to Whisper's 16 kHz.
+        audio = _resample(audio, self._capture_rate, SAMPLE_RATE)
         duration = len(audio) / SAMPLE_RATE
         if duration < MIN_DURATION_SEC:
             log.debug("AudioRecorder: recording too short (%.2fs) — discarding", duration)
             return None
 
-        log.debug("AudioRecorder: captured %.2fs of audio", duration)
+        log.debug("AudioRecorder: captured %.2fs of audio (%d Hz → %d Hz)",
+                  duration, self._capture_rate, SAMPLE_RATE)
         return audio
 
     def close(self) -> None:
@@ -303,14 +344,19 @@ class AudioRecorder:
                 time.sleep(0.005)
                 continue
 
+            # Resample the raw (native-rate) chunk to 16 kHz up front so the
+            # noise profile, noise reduction, and the 16 kHz output stream all
+            # operate on a single, consistent rate.
+            flat = _resample(chunk.flatten(), self._capture_rate, SAMPLE_RATE)
+
             # No noisereduce: pass through unchanged
             if not nr_available:
-                self._pt_out_buffer.append(chunk)
+                self._pt_out_buffer.append(flat)
                 continue
 
             # Still building the noise profile: accumulate and pass through raw
             if not self._noise_ready:
-                self._noise_accum.append(chunk.flatten())
+                self._noise_accum.append(flat)
                 total = sum(len(c) for c in self._noise_accum)
                 if total >= int(_NOISE_PROFILE_SECS * SAMPLE_RATE):
                     self._noise_profile = np.concatenate(self._noise_accum)
@@ -321,12 +367,11 @@ class AudioRecorder:
                         "pass-through noise reduction active",
                         _NOISE_PROFILE_SECS,
                     )
-                self._pt_out_buffer.append(chunk)
+                self._pt_out_buffer.append(flat)
                 continue
 
             # Apply noise reduction using the pre-computed profile
             try:
-                flat = chunk.flatten()
                 processed = nr.reduce_noise(
                     y=flat,
                     sr=SAMPLE_RATE,
@@ -334,12 +379,10 @@ class AudioRecorder:
                     prop_decrease=0.9,
                     stationary=True,
                 )
-                self._pt_out_buffer.append(
-                    processed.reshape(chunk.shape).astype(np.float32)
-                )
+                self._pt_out_buffer.append(processed.astype(np.float32))
             except Exception as exc:
                 log.debug("Pass-through NR error — passing raw: %s", exc)
-                self._pt_out_buffer.append(chunk)
+                self._pt_out_buffer.append(flat)
 
     # ------------------------------------------------------------------
     # Private — streams
@@ -386,14 +429,23 @@ class AudioRecorder:
             # Capture up to two input channels. USB cards often present the
             # line input as one channel of a stereo pair (the other dead), so
             # we open the pair and pick the live channel in _to_mono().
+            #
+            # Open at the device's native sample rate, not a forced 16 kHz.
+            # Cheap USB capture dongles advertise 16 kHz but deliver garbled,
+            # aliased audio when actually run at it; we resample to SAMPLE_RATE
+            # ourselves (see _resample) so Whisper still sees clean 16 kHz.
             try:
-                max_in = int(sd.query_devices(self._device_index)["max_input_channels"])
+                info = sd.query_devices(self._device_index)
+                max_in = int(info["max_input_channels"])
+                native_sr = int(round(float(info["default_samplerate"])))
             except Exception:
                 max_in = 1
+                native_sr = SAMPLE_RATE
             self._channels = min(2, max(1, max_in))
+            self._capture_rate = native_sr if native_sr > 0 else SAMPLE_RATE
             self._ch_energy = None
             self._stream = sd.InputStream(
-                samplerate=SAMPLE_RATE,
+                samplerate=self._capture_rate,
                 channels=self._channels,
                 dtype="float32",
                 device=self._device_index,
@@ -403,8 +455,8 @@ class AudioRecorder:
             # the window before its first callback fires.
             self._last_callback_ts = time.monotonic()
             self._stream.start()
-            log.debug("AudioRecorder: stream opened on device %d (%d ch)",
-                      self._device_index, self._channels)
+            log.debug("AudioRecorder: stream opened on device %d (%d ch, %d Hz)",
+                      self._device_index, self._channels, self._capture_rate)
             return True
         except Exception as exc:
             self._stream = None
