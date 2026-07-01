@@ -103,6 +103,11 @@ class AudioRecorder:
         # Slow per-channel energy estimate used to pick the channel that
         # actually carries audio (a dead/unconnected channel is ignored).
         self._ch_energy: Optional[np.ndarray] = None
+        # Index of the channel currently being emitted. Latched: it is held
+        # through silence and only changes when another channel is decisively
+        # and sustainedly louder, so inter-word gaps and word onsets are never
+        # dropped by selection flipping to a dead channel.
+        self._live_ch: int = 0
         self._chunks: list[np.ndarray] = []
         self._lock = threading.Lock()
         self._recording = False
@@ -444,6 +449,7 @@ class AudioRecorder:
             self._channels = min(2, max(1, max_in))
             self._capture_rate = native_sr if native_sr > 0 else SAMPLE_RATE
             self._ch_energy = None
+            self._live_ch = 0
             self._stream = sd.InputStream(
                 samplerate=self._capture_rate,
                 channels=self._channels,
@@ -487,14 +493,27 @@ class AudioRecorder:
     # Private — callbacks
     # ------------------------------------------------------------------
 
+    # Channel-selection tuning. The energy estimate is updated slowly so it
+    # reflects long-term loudness rather than per-word swings, and a channel is
+    # only switched to when it is decisively louder than the one in use. Without
+    # this hysteresis, argmax flips to a dead/quiet channel on every inter-word
+    # gap (where both channels sit at the noise floor) and lags by several
+    # callbacks when speech resumes — chopping word onsets and producing the
+    # fragmented "choppy" audio that defeats transcription.
+    _CH_ENERGY_SMOOTHING = 0.05   # per-callback EMA weight for channel energy
+    _CH_SWITCH_MARGIN = 2.0       # switch only if the alternative is this many
+                                  # times louder than the current channel
+
     def _to_mono(self, indata: np.ndarray) -> np.ndarray:
         """Reduce a capture block to one DC-blocked mono channel (1-D float32).
 
         Removes each channel's DC bias — USB line inputs often carry a large
         constant offset that otherwise pins the level meter and defeats
-        silence detection — then, for a multi-channel device, selects the
-        channel with the most recent signal energy so a dead/unconnected
-        channel is ignored instead of mixed in.
+        silence detection — then, for a multi-channel device, emits a single
+        latched channel: the one carrying audio. Selection is held through
+        silence and only changes when another channel is decisively and
+        sustainedly louder, so a dead/unconnected channel is ignored without
+        dropping inter-word gaps or word onsets.
         """
         block = indata.astype(np.float32, copy=True)
         if block.ndim == 1:
@@ -503,13 +522,24 @@ class AudioRecorder:
         block = block - block.mean(axis=0, keepdims=True)
         if block.shape[1] == 1:
             return block[:, 0]
-        # Slowly track per-channel energy and emit the liveliest channel.
+        # Slowly track per-channel energy.
         energies = np.sqrt(np.mean(block ** 2, axis=0))
         if self._ch_energy is None or self._ch_energy.shape[0] != energies.shape[0]:
             self._ch_energy = energies.copy()
+            self._live_ch = int(np.argmax(energies))
         else:
-            self._ch_energy += (energies - self._ch_energy) * 0.1
-        return block[:, int(np.argmax(self._ch_energy))]
+            self._ch_energy += (energies - self._ch_energy) * self._CH_ENERGY_SMOOTHING
+            best = int(np.argmax(self._ch_energy))
+            # Only switch on a clear, sustained margin — never on a noise-floor
+            # tie during silence, which would drop the next word's onset.
+            if (best != self._live_ch
+                    and self._ch_energy[best]
+                    > self._ch_energy[self._live_ch] * self._CH_SWITCH_MARGIN):
+                self._live_ch = best
+        # Clamp in case the channel count shrank between callbacks.
+        if self._live_ch >= block.shape[1]:
+            self._live_ch = int(np.argmax(self._ch_energy))
+        return block[:, self._live_ch]
 
     def _audio_callback(
         self,
