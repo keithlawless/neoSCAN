@@ -177,6 +177,16 @@ class ScannerProtocol:
                 "sys_name", "grp_name", "ch_name",
                 "sql", "mute", "sys_tag", "chan_tag", "p25nac"]
         info = {keys[i]: fields[i] for i in range(min(len(keys), len(fields)))}
+        # Squelch closed (SQL field 7 == "0") means the scanner is sitting on
+        # the channel with no live audio — the post-transmission hang/delay.
+        # Treat that as idle so a transmission ends when the audio stops, not
+        # when the scanner finally leaves the channel. Keying on frequency
+        # alone counted the hang time as part of the transmission, inflating
+        # logged durations by a median ~3x and making back-to-back rows look
+        # like they overlapped. An absent/empty SQL field falls through to the
+        # frequency check so behaviour is unchanged when the radio omits it.
+        if info.get("sql", "").strip() == "0":
+            return None
         # When idle the scanner returns all-empty fields; frequency absent = no transmission
         if not info.get("frequency"):
             return None

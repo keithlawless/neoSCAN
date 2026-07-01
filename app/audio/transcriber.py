@@ -289,6 +289,36 @@ class TranscriberWorker(QThread):
 
             self._process(job)
 
+    def _post(self, audio_bytes: bytes, vad: bool) -> dict:
+        """Send one raw-f32-16k clip to the whisper-wrapper server.
+
+        Returns the decoded JSON result. Raises on network/HTTP errors, which
+        _process handles. `vad` toggles server-side voice-activity detection
+        per request so the retry path can re-send with VAD on.
+        """
+        body = (
+            b"--" + _MULTIPART_BOUNDARY + b"\r\n"
+            b'Content-Disposition: form-data; name="audio"; filename="audio.raw"\r\n'
+            b"Content-Type: application/octet-stream\r\n\r\n"
+            + audio_bytes + b"\r\n"
+            + _multipart_field("format", "raw_f32_16k")
+            + _multipart_field("model", self._model_size)
+            + _multipart_field("vad", "true" if vad else "false")
+            + (_multipart_field("language", self._language) if self._language else b"")
+            + b"--" + _MULTIPART_BOUNDARY + b"--\r\n"
+        )
+        req = urllib.request.Request(
+            f"{self._server_url}/v1/transcribe",
+            data=body,
+            headers={
+                "Content-Type": (
+                    f"multipart/form-data; boundary={_MULTIPART_BOUNDARY.decode()}"
+                )
+            },
+        )
+        with urllib.request.urlopen(req, timeout=90) as resp:
+            return json.loads(resp.read())
+
     def _process(self, job: _TranscriptionJob) -> None:
         raw = job.audio
         duration = len(raw) / SAMPLE_RATE
@@ -330,38 +360,38 @@ class TranscriberWorker(QThread):
 
             audio_bytes = normalized.astype(np.float32).tobytes()
 
-            body = (
-                b"--" + _MULTIPART_BOUNDARY + b"\r\n"
-                b'Content-Disposition: form-data; name="audio"; filename="audio.raw"\r\n'
-                b"Content-Type: application/octet-stream\r\n\r\n"
-                + audio_bytes + b"\r\n"
-                + _multipart_field("format", "raw_f32_16k")
-                + _multipart_field("model", self._model_size)
-                + _multipart_field("vad", "true" if self._vad else "false")
-                + (_multipart_field("language", self._language) if self._language else b"")
-                + b"--" + _MULTIPART_BOUNDARY + b"--\r\n"
-            )
-            req = urllib.request.Request(
-                f"{self._server_url}/v1/transcribe",
-                data=body,
-                headers={
-                    "Content-Type": (
-                        f"multipart/form-data; boundary={_MULTIPART_BOUNDARY.decode()}"
-                    )
-                },
-            )
-            with urllib.request.urlopen(req, timeout=90) as resp:
-                result = json.loads(resp.read())
-
+            result = self._post(audio_bytes, self._vad)
             segments = result.get("segments", [])
+            text = result.get("text", "").strip()
+            suppressed = _filter_hallucination(text, segments)
+
+            # Retry-with-VAD-on fallback. With VAD off, whisper occasionally
+            # decodes a perfectly clean clip as bare punctuation ("!") — the
+            # VAD pass trims the leading non-speech that derails the decoder.
+            # So when the no-VAD result is empty/filtered, re-send the same clip
+            # once with VAD enabled before giving up. Costs one extra request
+            # only on otherwise-dead results, and keeps VAD off as the default
+            # (which preserves quiet/short speech the VAD would drop).
+            if not suppressed and not self._vad:
+                log.info(
+                    "Transcription row %d: empty/filtered with VAD off — "
+                    "retrying once with VAD on", job.row_index,
+                )
+                retry = self._post(audio_bytes, True)
+                r_segments = retry.get("segments", [])
+                r_text = retry.get("text", "").strip()
+                r_suppressed = _filter_hallucination(r_text, r_segments)
+                if r_suppressed:
+                    result, segments, text, suppressed = (
+                        retry, r_segments, r_text, r_suppressed,
+                    )
+
             for seg in segments:
                 log.debug(
                     "  row %d seg [%.1f-%.1fs] no_speech_prob=%.3f %r",
                     job.row_index, seg["start"], seg["end"],
                     seg.get("no_speech_prob") or 0.0, seg["text"][:80],
                 )
-            text = result.get("text", "").strip()
-            suppressed = _filter_hallucination(text, segments)
             if suppressed != text:
                 log.info(
                     "Transcription row %d: suppressed likely hallucination %r "
