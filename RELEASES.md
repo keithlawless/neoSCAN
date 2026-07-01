@@ -2,6 +2,17 @@
 
 ---
 
+## v1.4.1 — 2026-07-01
+
+### Audio capture, transcription, and transmission-log fixes
+
+- **Clear recordings from USB capture dongles**: audio is now captured at the device's native sample rate and resampled to 16 kHz in software. Forcing the input stream to 16 kHz produced garbled, aliased audio on cheap USB dongles that advertise 16 kHz support but don't truly deliver it — which Whisper could not transcribe
+- **Fewer spurious "no audio" transcripts**: when the transcription server returns nothing (a known failure where Whisper decodes a clean clip as a lone punctuation mark with VAD off), the clip is automatically retried once with voice-activity detection enabled before being dropped, recovering the real speech
+- **No more choppy audio during pauses**: the live input channel is now latched, so brief inter-word silences no longer cause the capture to flip to a dead channel and chop off the start of the next word — a frequent source of fragmented, un-transcribable clips
+- **Accurate transmission durations**: the transmission log now ends an entry when the squelch closes rather than when the scanner finally leaves the channel. Previously the post-transmission hang/delay was counted as part of the transmission, inflating logged durations by roughly 3x and making back-to-back transmissions appear to overlap
+
+---
+
 ## v1.4.0 — 2026-06-19
 
 ### Better transcription on real-world scanner audio
