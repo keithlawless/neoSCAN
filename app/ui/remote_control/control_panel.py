@@ -407,6 +407,13 @@ class ControlPanel(QWidget):
             self._display_top.setText("---")
             self._display_bottom.setText("")
 
+    def showEvent(self, event) -> None:
+        # Re-sync the volume/squelch sliders each time this radio's controls
+        # become visible, so they reflect any changes made with the physical
+        # knobs while another tab was showing. No continuous polling is needed.
+        super().showEvent(event)
+        self._init_levels()
+
     def _init_levels(self) -> None:
         """Query and initialize volume/squelch sliders from scanner."""
         if not self._proto:
