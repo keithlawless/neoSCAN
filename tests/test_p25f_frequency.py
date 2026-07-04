@@ -44,7 +44,8 @@ def test_is_p25f_flag():
 
 def test_p25f_frequency_round_trips_through_996():
     cfg = _make_p25f("851.0125")
-    path = tempfile.mktemp(suffix=".996")
+    fd, path = tempfile.mkstemp(suffix=".996")
+    os.close(fd)
     try:
         save(cfg, path)
         reloaded = load(path)
