@@ -12,6 +12,7 @@ from difflib import SequenceMatcher
 from typing import NamedTuple
 
 from app.data.models import Channel, Group, System, ScannerConfig, SYS_TYPE_CONVENTIONAL, TalkGroup
+from app.serial.scanner_model import parse_tone_to_code
 
 log = logging.getLogger(__name__)
 
@@ -208,7 +209,18 @@ def _apply_field(
                 ch.audio_type = audio
         elif field == "tone":
             if hasattr(ch, "tone"):
-                ch.tone = value
+                # RadioReference exports tones as "114.8 PL" / "D023"; the
+                # scanner stores a numeric code (114.8 PL = 80). Translate here
+                # so the imported value is upload-ready. Unrecognised values are
+                # kept verbatim and flagged in the channel editor.
+                code = parse_tone_to_code(value)
+                if code is not None:
+                    ch.tone = code
+                else:
+                    ch.tone = value
+                    warnings.append(
+                        f"Row {row_num}: tone '{value}' not recognised — left as-is"
+                    )
         elif field == "lockout":
             ch.lockout = value.lower() in ("1", "true", "yes", "y", "locked", "lo")
         elif field == "priority":

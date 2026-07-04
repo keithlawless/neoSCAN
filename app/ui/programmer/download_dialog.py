@@ -517,9 +517,13 @@ class _DownloadWorker(QThread):
         sys_obj.id_search = _f(trn, 0)
         sys_obj.p25_nac = _f(trn, 27) or "SRCH"
 
-        # --- Sites → trunk frequencies (P25S only; P25F has no sites) ---
+        # --- Sites → trunk frequencies ---
+        # P25S has one or more multi-frequency sites; P25F has a single site
+        # carrying its one control/voice frequency. Both are traversed the same
+        # way. The frequency is captured onto sys_obj.trunk_frequencies; for
+        # P25F the site group itself is not surfaced in the tree (see below).
         is_p25f = sys_obj.is_p25f
-        if not is_p25f:
+        if first_site_field and first_site_field.strip() != "-1":
             try:
                 site_idx = int(first_site_field)
             except (ValueError, TypeError):
@@ -585,7 +589,12 @@ class _DownloadWorker(QThread):
                     self.log_line.emit(f"    TF {freq_str} MHz  LCN {lcn}")
                     tfq_idx = next_tfq_idx
 
-                sys_obj.groups.append(site_grp)
+                # A P25F system's single frequency is captured onto
+                # sys_obj.trunk_frequencies above; the synthetic site group is
+                # not shown in the tree (the editor exposes the one frequency
+                # directly on the system form).
+                if not is_p25f:
+                    sys_obj.groups.append(site_grp)
                 site_idx = next_site_idx
 
         # --- TGID groups → talk groups ---

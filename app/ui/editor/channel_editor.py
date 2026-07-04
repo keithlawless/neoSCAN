@@ -31,6 +31,7 @@ from app.data.models import (
     SYS_TYPE_P25, SYS_TYPE_P25_EDACS,
 )
 from app.data.band_plan import is_frequency_valid
+from app.serial.scanner_model import ctcss_dcs_tone_options, parse_tone_to_code
 import uuid
 
 
@@ -53,6 +54,13 @@ HELP = {
         "Up to 16 characters. Displayed on the scanner's screen when "
         "this channel is active. Keep it short and descriptive."
     ),
+    "p25f_frequency": (
+        "Trunk Frequency (MHz)\n\n"
+        "A P25 One-Frequency Trunk carries both the control channel and "
+        "voice on a single frequency. Enter that one frequency in MHz, "
+        "e.g. 851.0125. Talk groups are added under this system's TGID "
+        "groups, the same as a standard P25 system."
+    ),
     "modulation": (
         "Modulation Mode\n\n"
         "How the scanner decodes the signal:\n"
@@ -65,10 +73,14 @@ HELP = {
     ),
     "tone": (
         "CTCSS / DCS Tone\n\n"
-        "Continuous Tone-Coded Squelch System (CTCSS) or Digital Coded "
-        "Squelch (DCS). Set this if the channel uses a subaudible tone "
-        "to control squelch. Leave as NONE to scan all traffic.\n\n"
-        "Common values: 100.0, 127.3, 136.5 Hz (CTCSS) or Dxxx (DCS)."
+        "Continuous Tone-Coded Squelch System (CTCSS, shown as '114.8 PL') "
+        "or Digital Coded Squelch (DCS, shown as 'DCS 023'). Set this if the "
+        "channel uses a subaudible tone to control squelch — the scanner then "
+        "unmutes only for signals carrying that exact tone. Choose None to "
+        "hear all traffic, or Search to have the scanner identify the tone.\n\n"
+        "The list is scoped to the connected radio; the correct code is stored "
+        "automatically (e.g. 114.8 PL is code 80). Enable 'Tone lockout' below "
+        "to ignore the tone and open squelch on any signal."
     ),
     "delay": (
         "Scan Delay\n\n"
@@ -484,12 +496,32 @@ class ChannelEditorPanel(QWidget):
         form.addRow("Audio Type:", c_audio)
         form.addRow("", _help_label("audio_type"))
 
-        # Tone
-        e_tone = QLineEdit(ch.tone)
-        e_tone.setPlaceholderText("0 = NONE, or tone index")
-        e_tone.setToolTip(HELP["tone"])
-        e_tone.textChanged.connect(lambda v: self._set_channel_field(s_idx, g_idx, c_idx, "tone", v))
-        form.addRow("CTCSS/DCS Tone:", e_tone)
+        # Tone (CTCSS/DCS) — drop-down of the connected model's code table.
+        c_tone = QComboBox()
+        for code, label in ctcss_dcs_tone_options(self._scanner_model):
+            c_tone.addItem(label, userData=code)
+        # Resolve the stored value to a code. Legacy hand-entered values like
+        # "114.8" are normalised to their code (80) in place so display, save
+        # and upload all agree; a value we can't resolve is surfaced verbatim
+        # rather than silently mangled.
+        stored = (ch.tone or "0").strip()
+        resolved = parse_tone_to_code(stored, self._scanner_model)
+        if resolved is not None:
+            if resolved != stored:
+                ch.tone = resolved  # heal in place (no modified flag on load)
+            idx = c_tone.findData(resolved)
+            if idx < 0:  # valid code but not in this model's list (foreign download)
+                c_tone.addItem(f"code {resolved}", userData=resolved)
+                idx = c_tone.findData(resolved)
+            c_tone.setCurrentIndex(idx)
+        else:
+            c_tone.addItem(f"⚠ {stored} (invalid)", userData=stored)
+            c_tone.setCurrentIndex(c_tone.count() - 1)
+        c_tone.setToolTip(HELP["tone"])
+        c_tone.currentIndexChanged.connect(
+            lambda _: self._set_channel_field(s_idx, g_idx, c_idx, "tone", c_tone.currentData())
+        )
+        form.addRow("CTCSS/DCS Tone:", c_tone)
         form.addRow("", _help_label("tone"))
 
         # Delay
@@ -762,8 +794,53 @@ class ChannelEditorPanel(QWidget):
 
         layout.addWidget(params_box)
 
-        # ---- Trunk Frequencies table (P25F has a single embedded frequency — no site) ----
+        # ---- P25 One-Frequency Trunk: exactly one control/voice frequency ----
         if sys.is_p25f:
+            of_box = QGroupBox("Trunk Frequency")
+            of_form = QFormLayout(of_box)
+            existing = sys.trunk_frequencies[0].frequency if sys.trunk_frequencies else ""
+            e_onefreq = QLineEdit(existing)
+            e_onefreq.setPlaceholderText("e.g. 851.0125")
+            e_onefreq.setToolTip(HELP["p25f_frequency"])
+
+            of_range_warning = QLabel()
+            of_range_warning.setStyleSheet("color: #cc6600; font-size: 11px;")
+            of_range_warning.setWordWrap(True)
+            of_range_warning.setVisible(False)
+
+            def _update_of_range_warning(freq_str: str) -> None:
+                msg = check_frequency_in_band(freq_str, self._scanner_model)
+                if msg:
+                    of_range_warning.setText(msg)
+                    of_range_warning.setVisible(True)
+                else:
+                    of_range_warning.setVisible(False)
+
+            def _set_onefreq(text: str) -> None:
+                if not self._config:
+                    return
+                val = text.strip()
+                _update_of_range_warning(val)
+                if sys.trunk_frequencies:
+                    tf = sys.trunk_frequencies[0]
+                elif val:
+                    # Create the backing frequency lazily so merely viewing the
+                    # form never adds an empty trunk entry.
+                    tf = TrunkFrequency()
+                    tf.group_id = sys.group_id
+                    sys.trunk_frequencies.append(tf)
+                else:
+                    return
+                tf.frequency = val
+                self._config.modified = True
+                self.modified.emit()
+
+            e_onefreq.textChanged.connect(_set_onefreq)
+            of_form.addRow("Frequency (MHz):", e_onefreq)
+            of_form.addRow("", of_range_warning)
+            of_form.addRow("", _help_label("p25f_frequency"))
+            layout.addWidget(of_box)
+            _update_of_range_warning(existing)
             return
         tf_box = QGroupBox("Trunk Frequencies")
         tf_vbox = QVBoxLayout(tf_box)

@@ -250,7 +250,8 @@ class System:
 
     @property
     def is_p25f(self) -> bool:
-        """P25 One-Frequency Trunk — no sites, just TGID groups."""
+        """P25 One-Frequency Trunk — a single control/voice frequency (stored
+        in trunk_frequencies) plus TGID groups."""
         return self.system_type == SYS_TYPE_P25_EDACS
 
     @property
