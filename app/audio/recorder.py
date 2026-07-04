@@ -111,6 +111,11 @@ class AudioRecorder:
         self._chunks: list[np.ndarray] = []
         self._lock = threading.Lock()
         self._recording = False
+        # A capture session is open (start_recording called, stop_recording not
+        # yet). Distinct from _recording so a session can be paused between
+        # key-ups within a conversation: _recording goes False (stop appending)
+        # while _active stays True and the buffered chunks are retained.
+        self._active = False
         # monotonic timestamp of the most recent input callback; used to detect
         # a stream that has silently stopped delivering audio (sleep/resume).
         self._last_callback_ts: float = 0.0
@@ -206,8 +211,41 @@ class AudioRecorder:
                 return
         with self._lock:
             self._chunks = []
+        self._active = True
         self._recording = True
         log.debug("AudioRecorder: started on device %d", self._device_index)
+
+    def pause_recording(self) -> None:
+        """Stop appending audio but keep the buffered clip and the session open.
+
+        Used between key-ups within a single conversation: the silent gap is
+        excised (nothing is captured while paused) while the speech accumulated
+        so far is retained for one merged transcription. No-op if no session is
+        active. Call resume_recording() to continue, or stop_recording() to
+        finalize the merged clip.
+        """
+        if self._active:
+            self._recording = False
+
+    def resume_recording(self) -> None:
+        """Resume a paused session, appending to the already-buffered audio.
+
+        Self-heals a stream that died during the pause (sleep/resume, USB
+        re-enumeration) by reopening it — without clearing the buffered chunks,
+        so the earlier speech in this conversation is preserved.
+        """
+        if not self._active:
+            return
+        if not self._stream_is_live():
+            if self._stream is not None:
+                log.warning(
+                    "AudioRecorder: input stream died during pause — reopening "
+                    "on device %s", self._device_index,
+                )
+                self._close_stream()
+            if not self._open_stream():
+                return
+        self._recording = True
 
     def start_monitoring(self) -> bool:
         """Open the input stream (if not already live) so input levels and
@@ -262,9 +300,10 @@ class AudioRecorder:
         The stream is left open so it is ready for the next recording without
         a create/destroy cycle (which was the source of the SIGSEGV).
         """
-        if not self._recording:
+        if not self._active:
             return None
         self._recording = False
+        self._active = False
 
         with self._lock:
             chunks = list(self._chunks)
@@ -294,6 +333,7 @@ class AudioRecorder:
     def close(self) -> None:
         """Release audio resources. Call once on shutdown."""
         self._recording = False
+        self._active = False
         self._passthrough = False
         self._stop_pt_thread()
         self._close_out_stream()
