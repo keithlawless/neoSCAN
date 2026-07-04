@@ -641,7 +641,8 @@ class _UploadWorker(QThread):
     ) -> int:
         """
         Upload TRN parameters, sites/trunk-freqs, and TGID groups/talk-groups
-        for a P25 trunked system. P25S has sites; P25F (one-frequency) does not.
+        for a P25 trunked system. P25S has a multi-frequency site; P25F carries
+        a single control/voice frequency on its own site.
         Returns the number of talk groups uploaded.
         """
         tg_count = 0
@@ -677,11 +678,14 @@ class _UploadWorker(QThread):
         except ProtocolError as e:
             self.log_line.emit(f"  Warning: TRN error: {e}")
 
-        # --- Trunk frequencies (P25S only; P25F has no sites) ---
-        if not sys.is_p25f and sys.trunk_frequencies:
+        # --- Trunk frequencies ---
+        # P25S carries multiple frequencies on a site; P25F carries a single
+        # control/voice frequency on its own site. Both use AST + SIF + TFQ.
+        if sys.trunk_frequencies:
+            site_type = "P25F" if sys.is_p25f else "P25S"
             try:
-                site_index = proto.append_site(int(sys_index), "P25S")
-                self.log_line.emit(f"  Created P25 site (AST P25S) → index {site_index}")
+                site_index = proto.append_site(int(sys_index), site_type)
+                self.log_line.emit(f"  Created P25 site (AST {site_type}) → index {site_index}")
             except ProtocolError as e:
                 self.log_line.emit(f"  Warning: AST error: {e}")
                 site_index = -1
