@@ -36,11 +36,21 @@ POLL_INTERVAL_MS = 150   # poll scanners every 150ms
 # entry is held open for this grace window; if the same channel keys up again
 # within it, the key-ups are merged into one "conversation" entry and one audio
 # clip, giving Whisper more surrounding context to transcribe accurately.
-# Recording is paused during the gap (see AudioRecorder.pause_recording), so the
-# merged clip stays speech-only and the reported duration stays squelch-gated —
-# the recent audio-quality fixes are preserved. Only after the window elapses
-# with no re-key is the transmission finalized and sent for transcription.
+# Recording is paused during the gap (see AudioRecorder.pause_recording) to keep
+# squelch-tail noise out; the gap is re-inserted as clean silence on resume so
+# the merged clip keeps natural pacing (splicing the speech together made it
+# sound sped up and hurt transcription). Only after the window elapses with no
+# re-key is the transmission finalized and sent for transcription.
 CONVERSATION_GAP_MS = 3000
+
+# Capture is not paused the instant squelch reads closed. On marginal or trunked
+# signals the SQL flag picket-fences — flicking closed for a poll or two mid-
+# transmission — and pausing on the first closed poll gates most of a continuous
+# transmission out (it captured as sub-second clips and got discarded). We debounce:
+# keep recording through a brief dip and only pause once squelch has stayed closed
+# this long. Must be < CONVERSATION_GAP_MS. The cost is up to this much squelch-tail
+# audio at the end of each clip, so keep it small.
+CAPTURE_PAUSE_DEBOUNCE_MS = 500
 
 # Log table columns
 COL_RADIO = 0
@@ -124,6 +134,11 @@ class LogPanel(QWidget):
         self._active_entry_rows: dict[str, int] = {}                     # label → row index
         # label → monotonic time squelch closed, for entries in the grace window
         self._squelch_closed_mono: dict[str, float] = {}
+        # labels whose recorder is currently paused (squelch stayed closed past
+        # CAPTURE_PAUSE_DEBOUNCE_MS). Tracked so resume only un-pauses a recorder
+        # that was actually paused — a dip shorter than the debounce never paused,
+        # so capture ran straight through and there is no gap to re-insert.
+        self._capture_paused: set[str] = set()
         self._paused_labels: set[str] = set()
         self._build_ui()
 
@@ -195,6 +210,7 @@ class LogPanel(QWidget):
         self._radios = [r for r in self._radios if r.label != label]
         self._active_entries.pop(label, None)
         self._squelch_closed_mono.pop(label, None)
+        self._capture_paused.discard(label)
         self._paused_labels.discard(label)
 
         if not self._radios:
@@ -249,6 +265,7 @@ class LogPanel(QWidget):
                     self._refresh_row(row_index)
                 self._active_entries[label] = None
         self._squelch_closed_mono.clear()
+        self._capture_paused.clear()
         self._status_label.setText("Stopped.")
         self._status_label.setStyleSheet("font-size: 11px; color: gray;")
         self._set_controls(connected=len(self._radios) > 0, logging=False)
@@ -258,6 +275,7 @@ class LogPanel(QWidget):
         self._active_entries = {label: None for label in self._active_entries}
         self._active_entry_rows.clear()
         self._squelch_closed_mono.clear()
+        self._capture_paused.clear()
         self._table.setRowCount(0)
         self._set_controls(connected=len(self._radios) > 0, logging=self._timer.isActive())
 
@@ -300,18 +318,26 @@ class LogPanel(QWidget):
                     if active is None:
                         continue
                     if not active.pending_close:
-                        # Squelch just closed — pause capture and start the grace
-                        # window. Freeze the duration at the close (squelch-gated).
+                        # Squelch just closed — freeze the duration (squelch-gated)
+                        # and start the grace window. Do NOT pause capture yet:
+                        # capture is held through the debounce so a brief squelch
+                        # dip does not gate out a continuous transmission.
                         active.pending_close = True
                         active.squelch_closed_at = datetime.now()
                         active.end_time = active.squelch_closed_at
                         self._squelch_closed_mono[label] = now_mono
-                        if radio.transcription_manager:
-                            radio.transcription_manager.on_transmission_paused()
                         self._refresh_row(self._active_entry_rows[label])
                     else:
-                        closed_at = self._squelch_closed_mono.get(label, now_mono)
-                        if now_mono - closed_at >= CONVERSATION_GAP_MS / 1000.0:
+                        closed_for = now_mono - self._squelch_closed_mono.get(label, now_mono)
+                        if (label not in self._capture_paused
+                                and closed_for >= CAPTURE_PAUSE_DEBOUNCE_MS / 1000.0):
+                            # Squelch has stayed closed past the debounce — this is a
+                            # real gap, not a dip. Pause capture so squelch-tail noise
+                            # and the inter-key-up gap are kept out of the clip.
+                            self._capture_paused.add(label)
+                            if radio.transcription_manager:
+                                radio.transcription_manager.on_transmission_paused()
+                        if closed_for >= CONVERSATION_GAP_MS / 1000.0:
                             # Grace window elapsed with no re-key — finalize.
                             self._finalize_entry(radio, label)
             except Exception:
@@ -329,6 +355,7 @@ class LogPanel(QWidget):
     def _begin_entry(self, radio: RadioConnection, info: dict) -> None:
         """Open a new transmission entry and start recording."""
         label = radio.label
+        self._capture_paused.discard(label)  # fresh session starts un-paused
         entry = _TransmissionEntry(info, radio_label=label)
         row_index = len(self._entries)
         self._entries.append(entry)
@@ -347,8 +374,14 @@ class LogPanel(QWidget):
         entry.end_time = None
         entry.squelch_closed_at = None
         self._squelch_closed_mono.pop(label, None)
-        if radio.transcription_manager:
-            radio.transcription_manager.on_transmission_resumed()
+        if label in self._capture_paused:
+            # Capture was paused (the gap exceeded the debounce) — resume and let
+            # the recorder re-insert the gap as silence to keep pacing.
+            self._capture_paused.discard(label)
+            if radio.transcription_manager:
+                radio.transcription_manager.on_transmission_resumed()
+        # Otherwise the dip was shorter than the debounce: capture never paused, so
+        # recording ran straight through and there is no gap to re-insert.
         self._refresh_row(self._active_entry_rows[label])
 
     def _finalize_entry(self, radio: RadioConnection, label: str) -> None:
@@ -359,6 +392,7 @@ class LogPanel(QWidget):
             return
         row_index = self._active_entry_rows.pop(label, None)
         self._squelch_closed_mono.pop(label, None)
+        self._capture_paused.discard(label)
         entry.pending_close = False
         if entry.end_time is None:
             entry.end_time = entry.squelch_closed_at or datetime.now()
