@@ -2,6 +2,21 @@
 
 ---
 
+## v1.4.2 — 2026-07-13
+
+### Conversation merging and audio-capture reliability
+
+- **Consecutive key-ups merge into one conversation**: back-to-back transmissions on the same channel within a short grace window are now folded into a single log entry and a single audio clip, giving Whisper more surrounding context for a more accurate transcript. The squelch-closed gap between key-ups is re-inserted as clean silence (capped) so the merged clip keeps natural pacing instead of sounding spliced-together and sped up
+- **Recovers long transmissions that came back as "no audio"**: an input stream left open for days across sleep/wake cycles can quietly degrade to delivering only a fraction of its audio while still appearing alive, so a 25-second transmission was captured as ~5 seconds and often discarded. The recorder now measures the effective sample rate and automatically reopens a degraded stream, so capture self-heals instead of silently losing most of each transmission for hours
+- **No more fragmented clips on flickery signals**: on marginal or trunked signals the squelch can flick closed for a fraction of a second mid-transmission. Capture is no longer paused on the first closed poll — it holds through a brief dip and only pauses once the squelch has genuinely stayed closed — so a continuous transmission is recorded as one clip rather than fragmenting into discarded sub-second pieces
+
+### Radio programming and remote control
+
+- **CTCSS/DCS tone selection and P25 single-frequency support**: the channel editor gains a CTCSS/DCS tone dropdown and a P25 single-frequency (P25F) field
+- **Correct volume/squelch sliders on tab switch**: a radio's volume and squelch sliders now re-sync to the scanner's current values when its Remote Control tab becomes visible, instead of showing stale positions
+
+---
+
 ## v1.4.1 — 2026-07-01
 
 ### Audio capture, transcription, and transmission-log fixes
