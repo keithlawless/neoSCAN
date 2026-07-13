@@ -25,6 +25,20 @@ _NOISE_PROFILE_SECS = 2.0  # seconds of squelch audio used to build noise profil
 # recordings). If no callback has arrived in this many seconds the stream is
 # considered dead — e.g. after a system sleep/resume or USB re-enumeration.
 _STREAM_STALE_SEC = 2.0
+# Under-delivery watchdog. A persistent input stream that has been open a long
+# time (days of uptime, sleep/wake cycles) can degrade into delivering only a
+# fraction of its frames per wall-second while still firing callbacks — so
+# _STREAM_STALE_SEC above never trips, yet a 25 s transmission is captured as
+# ~5 s. We measure the effective sample rate over a rolling window and reopen
+# the stream when it falls below this fraction of the rate the device claims.
+_UNDERDELIVERY_FRACTION = 0.6   # reopen if effective rate < 60% of _capture_rate
+_UNDERDELIVERY_WINDOW_SEC = 4.0  # minimum callback history before judging
+# When key-ups are merged into one conversation clip, the squelch-closed gap
+# between them is re-inserted as clean silence (up to this cap) instead of being
+# spliced out. Deleting the pauses made conversations run together and sound
+# sped up, hurting intelligibility and Whisper's utterance segmentation; a real
+# pause preserves natural pacing and gives Whisper a segmentation cue.
+_MAX_GAP_SILENCE_SEC = 2.0
 
 
 def _resample(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
@@ -111,9 +125,23 @@ class AudioRecorder:
         self._chunks: list[np.ndarray] = []
         self._lock = threading.Lock()
         self._recording = False
+        # A capture session is open (start_recording called, stop_recording not
+        # yet). Distinct from _recording so a session can be paused between
+        # key-ups within a conversation: _recording goes False (stop appending)
+        # while _active stays True and the buffered chunks are retained.
+        self._active = False
+        # monotonic time the current pause began (0.0 = not paused). Used to
+        # re-insert the gap as silence on resume so merged clips keep pacing.
+        self._pause_started = 0.0
         # monotonic timestamp of the most recent input callback; used to detect
         # a stream that has silently stopped delivering audio (sleep/resume).
         self._last_callback_ts: float = 0.0
+        # Rolling frame-delivery accounting for the under-delivery watchdog:
+        # frames seen since the window opened, and when it opened. Lets us
+        # compute the effective sample rate and catch a degraded stream that
+        # still fires callbacks but delivers far fewer frames than its rate.
+        self._cb_frames: int = 0
+        self._cb_window_start: float = 0.0
         # smoothed input level in [0, 1] (peak with fast attack / slow decay),
         # updated on every callback; drives the control-panel level meter.
         self._level: float = 0.0
@@ -204,10 +232,70 @@ class AudioRecorder:
                 self._close_stream()
             if not self._open_stream():
                 return
+        elif self._stream_underdelivering():
+            # Stream is alive but degraded (delivering a fraction of its frames,
+            # so long transmissions capture as a few seconds). It logged the
+            # rate; reopen a fresh stream before this recording so it — and every
+            # subsequent one — captures fully.
+            self._close_stream()
+            if not self._open_stream():
+                return
         with self._lock:
             self._chunks = []
+        self._active = True
         self._recording = True
+        self._pause_started = 0.0
         log.debug("AudioRecorder: started on device %d", self._device_index)
+
+    def pause_recording(self) -> None:
+        """Stop appending audio but keep the buffered clip and the session open.
+
+        Used between key-ups within a single conversation: nothing is captured
+        while paused (so squelch-tail noise is kept out), while the speech
+        accumulated so far is retained for one merged transcription. resume_
+        recording() re-inserts the gap as silence so pacing is preserved. No-op
+        if no session is active. Call stop_recording() to finalize the clip.
+        """
+        if self._active:
+            self._recording = False
+            self._pause_started = time.monotonic()
+
+    def resume_recording(self) -> None:
+        """Resume a paused session, appending to the already-buffered audio.
+
+        The squelch-closed gap is re-inserted as clean silence (capped at
+        _MAX_GAP_SILENCE_SEC) so the merged clip keeps the natural pause between
+        key-ups rather than splicing speech together. Self-heals a stream that
+        died during the pause (sleep/resume, USB re-enumeration) by reopening it
+        — without clearing the buffered chunks, so earlier speech is preserved.
+        """
+        if not self._active:
+            return
+        if not self._stream_is_live():
+            if self._stream is not None:
+                log.warning(
+                    "AudioRecorder: input stream died during pause — reopening "
+                    "on device %s", self._device_index,
+                )
+                self._close_stream()
+            if not self._open_stream():
+                return
+        elif self._stream_underdelivering():
+            # Degraded stream detected during the merge gap — reopen (buffered
+            # chunks are preserved) so the rest of the conversation captures fully.
+            self._close_stream()
+            if not self._open_stream():
+                return
+        if self._pause_started > 0.0:
+            gap = min(time.monotonic() - self._pause_started, _MAX_GAP_SILENCE_SEC)
+            self._pause_started = 0.0
+            n = int(gap * self._capture_rate)
+            if n > 0:
+                # Silence is added at the native capture rate; stop_recording
+                # resamples the whole buffer to 16 kHz uniformly.
+                with self._lock:
+                    self._chunks.append(np.zeros(n, dtype=np.float32))
+        self._recording = True
 
     def start_monitoring(self) -> bool:
         """Open the input stream (if not already live) so input levels and
@@ -254,6 +342,39 @@ class AudioRecorder:
             return False
         return (time.monotonic() - self._last_callback_ts) < _STREAM_STALE_SEC
 
+    def _reset_delivery_window(self) -> None:
+        """Start a fresh frame-rate measurement window (call on (re)open)."""
+        self._cb_frames = 0
+        self._cb_window_start = time.monotonic()
+
+    def _stream_underdelivering(self) -> bool:
+        """True if the stream is alive but delivering far fewer frames than its
+        rate implies — a degraded persistent stream (long uptime / sleep-wake)
+        that _stream_is_live() cannot catch because callbacks keep firing.
+
+        Measured over a rolling window: returns False until at least
+        _UNDERDELIVERY_WINDOW_SEC of callback history has accrued, then compares
+        the effective sample rate to the device's rate and resets the window.
+        Checked at start_recording/resume so a reopen heals every subsequent
+        transmission (the degradation persists for hours once it sets in).
+        """
+        if self._stream is None or self._capture_rate <= 0:
+            return False
+        elapsed = time.monotonic() - self._cb_window_start
+        if elapsed < _UNDERDELIVERY_WINDOW_SEC:
+            return False
+        effective_rate = self._cb_frames / elapsed
+        self._reset_delivery_window()
+        degraded = effective_rate < self._capture_rate * _UNDERDELIVERY_FRACTION
+        if degraded:
+            log.warning(
+                "AudioRecorder: input stream under-delivering on device %s — "
+                "%.0f Hz effective vs %d Hz expected (%.0f%%); reopening",
+                self._device_index, effective_rate, self._capture_rate,
+                100.0 * effective_rate / self._capture_rate,
+            )
+        return degraded
+
     def stop_recording(self) -> Optional[np.ndarray]:
         """
         Stop accumulating audio and return the captured data.
@@ -262,9 +383,10 @@ class AudioRecorder:
         The stream is left open so it is ready for the next recording without
         a create/destroy cycle (which was the source of the SIGSEGV).
         """
-        if not self._recording:
+        if not self._active:
             return None
         self._recording = False
+        self._active = False
 
         with self._lock:
             chunks = list(self._chunks)
@@ -294,6 +416,7 @@ class AudioRecorder:
     def close(self) -> None:
         """Release audio resources. Call once on shutdown."""
         self._recording = False
+        self._active = False
         self._passthrough = False
         self._stop_pt_thread()
         self._close_out_stream()
@@ -458,8 +581,11 @@ class AudioRecorder:
                 callback=self._audio_callback,
             )
             # Seed the liveness timestamp so the stream isn't judged stale in
-            # the window before its first callback fires.
+            # the window before its first callback fires, and start a fresh
+            # frame-rate window so the new stream isn't immediately judged
+            # under-delivering on stale counters.
             self._last_callback_ts = time.monotonic()
+            self._reset_delivery_window()
             self._stream.start()
             log.debug("AudioRecorder: stream opened on device %d (%d ch, %d Hz)",
                       self._device_index, self._channels, self._capture_rate)
@@ -552,6 +678,10 @@ class AudioRecorder:
         # Liveness heartbeat: a healthy stream fires this continuously, so
         # start_recording() can tell a live stream from a dead one.
         self._last_callback_ts = time.monotonic()
+        # Frame accounting for the under-delivery watchdog (see
+        # _stream_underdelivering). Counts frames actually handed to us, which
+        # is what drops when a long-lived stream degrades.
+        self._cb_frames += frames
         mono = self._to_mono(indata) if indata.size else indata
         # Track input level for the meter (peak with fast attack / slow decay).
         # Measured on the DC-blocked mono signal so a constant input bias no

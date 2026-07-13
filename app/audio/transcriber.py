@@ -549,6 +549,20 @@ class TranscriptionManager(QObject):
             return
         self._recorder.start_recording()
 
+    def on_transmission_paused(self) -> None:
+        """Squelch closed but the conversation may continue — pause capture so
+        the inter-key-up gap is excised from the merged clip."""
+        if not self._enabled:
+            return
+        self._recorder.pause_recording()
+
+    def on_transmission_resumed(self) -> None:
+        """The same channel keyed up again within the grace window — resume
+        capturing into the same clip."""
+        if not self._enabled:
+            return
+        self._recorder.resume_recording()
+
     def on_transmission_ended(self, row_index: int, entry) -> None:
         """
         Called when a transmission ends. Stops recording and enqueues a job.
