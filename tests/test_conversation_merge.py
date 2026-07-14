@@ -84,6 +84,64 @@ def test_pause_resume_stop_are_noops_without_session():
     assert r.stop_recording() is None
 
 
+def _recorder_with_fake_stream(monkeypatch_open=True):
+    """An AudioRecorder with a live fake stream and reopen counters, so recycling
+    can be exercised without a real audio device."""
+    import time
+    r = AudioRecorder()
+    r._device_index = 11
+    r._capture_rate = 48_000
+    calls = {"open": 0, "close": 0}
+
+    class _FakeStream:
+        active = True
+
+    def fake_open():
+        calls["open"] += 1
+        r._stream = _FakeStream()
+        r._last_callback_ts = time.monotonic()
+        r._reset_delivery_window()
+        r._stream_opened_at = time.monotonic()
+        return True
+
+    def fake_close():
+        calls["close"] += 1
+        r._stream = None
+
+    r._open_stream = fake_open
+    r._close_stream = fake_close
+    r._stream = _FakeStream()
+    r._last_callback_ts = time.monotonic()
+    return r, calls
+
+
+def test_recycle_recycles_stale_idle_stream():
+    import time
+    r, calls = _recorder_with_fake_stream()
+    r._active = False
+    r._stream_opened_at = time.monotonic() - 900     # older than _MAX_STREAM_AGE_SEC
+    assert r.recycle_if_idle_and_stale() is True
+    assert calls == {"open": 1, "close": 1}
+
+
+def test_recycle_skips_fresh_stream():
+    import time
+    r, calls = _recorder_with_fake_stream()
+    r._active = False
+    r._stream_opened_at = time.monotonic() - 60      # well within the age limit
+    assert r.recycle_if_idle_and_stale() is False
+    assert calls == {"open": 0, "close": 0}
+
+
+def test_recycle_never_interrupts_active_session():
+    import time
+    r, calls = _recorder_with_fake_stream()
+    r._active = True                                 # a capture session is open
+    r._stream_opened_at = time.monotonic() - 3600    # very old
+    assert r.recycle_if_idle_and_stale() is False
+    assert calls == {"open": 0, "close": 0}
+
+
 # ----------------------------------------------------------------------
 # LogPanel conversation merging
 # ----------------------------------------------------------------------
@@ -115,6 +173,11 @@ class _FakeTM(QObject):
 
     def on_transmission_ended(self, row, entry):
         self.events.append(("end", row))
+
+    def maybe_recycle_stream(self):
+        # Called every idle poll; a no-op for these merge tests (recycling never
+        # runs while a session is active, and never emits transmission events).
+        pass
 
 
 class _FakeRadio:

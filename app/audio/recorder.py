@@ -33,6 +33,13 @@ _STREAM_STALE_SEC = 2.0
 # the stream when it falls below this fraction of the rate the device claims.
 _UNDERDELIVERY_FRACTION = 0.6   # reopen if effective rate < 60% of _capture_rate
 _UNDERDELIVERY_WINDOW_SEC = 4.0  # minimum callback history before judging
+# Proactive stream recycling. The under-delivery reopen above is reactive — it
+# only heals a stream once it has already degraded, which for a long transmission
+# happens mid-clip and loses audio. The real trigger is age: a persistent stream
+# stays healthy for hours, then degrades. So we also recycle a stream once it has
+# been open this long, but only while idle (between transmissions), so it never
+# ages into the degraded state and a recycle never interrupts a live recording.
+_MAX_STREAM_AGE_SEC = 600.0     # recycle an idle stream older than this (10 min)
 # When key-ups are merged into one conversation clip, the squelch-closed gap
 # between them is re-inserted as clean silence (up to this cap) instead of being
 # spliced out. Deleting the pauses made conversations run together and sound
@@ -142,6 +149,9 @@ class AudioRecorder:
         # still fires callbacks but delivers far fewer frames than its rate.
         self._cb_frames: int = 0
         self._cb_window_start: float = 0.0
+        # monotonic time the current input stream was opened; drives proactive
+        # recycling of a stream that has been open long enough to risk degrading.
+        self._stream_opened_at: float = 0.0
         # smoothed input level in [0, 1] (peak with fast attack / slow decay),
         # updated on every callback; drives the control-panel level meter.
         self._level: float = 0.0
@@ -280,12 +290,11 @@ class AudioRecorder:
                 self._close_stream()
             if not self._open_stream():
                 return
-        elif self._stream_underdelivering():
-            # Degraded stream detected during the merge gap — reopen (buffered
-            # chunks are preserved) so the rest of the conversation captures fully.
-            self._close_stream()
-            if not self._open_stream():
-                return
+        # Note: we deliberately do NOT reopen a merely under-delivering stream
+        # here. Reopening mid-conversation drops the in-flight audio, and a
+        # transmission already degrading is a lost cause; proactive idle
+        # recycling keeps streams fresh so this rarely arises, and the reactive
+        # reopen in start_recording still heals it before the next transmission.
         if self._pause_started > 0.0:
             gap = min(time.monotonic() - self._pause_started, _MAX_GAP_SILENCE_SEC)
             self._pause_started = 0.0
@@ -310,6 +319,28 @@ class AudioRecorder:
             return True
         if self._stream is not None:
             self._close_stream()
+        return self._open_stream()
+
+    def recycle_if_idle_and_stale(self) -> bool:
+        """Recycle a healthy input stream that has simply been open too long.
+
+        Persistent streams degrade after hours of uptime; recycling before they
+        get that old keeps capture reliable. Only acts when no capture session is
+        open (``not _active``) so a live or paused recording is never interrupted,
+        and only on a live stream older than ``_MAX_STREAM_AGE_SEC`` — a dead or
+        missing stream is left to the reopen paths in start/resume. Cheap to call
+        every poll; returns True only when it actually recycled.
+        """
+        if self._stream is None or self._active:
+            return False
+        if not self._stream_is_live():
+            return False   # start_recording()/start_monitoring() will reopen it
+        if time.monotonic() - self._stream_opened_at < _MAX_STREAM_AGE_SEC:
+            return False
+        log.debug("AudioRecorder: recycling idle stream on device %s after "
+                  "%.0fs open to avoid age-related degradation",
+                  self._device_index, time.monotonic() - self._stream_opened_at)
+        self._close_stream()
         return self._open_stream()
 
     def current_level(self) -> float:
@@ -586,6 +617,7 @@ class AudioRecorder:
             # under-delivering on stale counters.
             self._last_callback_ts = time.monotonic()
             self._reset_delivery_window()
+            self._stream_opened_at = time.monotonic()
             self._stream.start()
             log.debug("AudioRecorder: stream opened on device %d (%d ch, %d Hz)",
                       self._device_index, self._channels, self._capture_rate)

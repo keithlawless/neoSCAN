@@ -312,6 +312,12 @@ class LogPanel(QWidget):
                         # Ongoing transmission — update duration in place
                         self._refresh_row(self._active_entry_rows[label])
                 else:
+                    # No signal on this radio right now — a good moment to
+                    # recycle its input stream if it has aged, so it never gets
+                    # old enough to degrade. No-op while a capture session
+                    # (including the post-squelch grace window) is still open.
+                    if radio.transcription_manager:
+                        radio.transcription_manager.maybe_recycle_stream()
                     if not self._logging:
                         continue
                     active = self._active_entries.get(label)
