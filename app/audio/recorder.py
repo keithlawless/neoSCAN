@@ -40,6 +40,14 @@ _UNDERDELIVERY_WINDOW_SEC = 4.0  # minimum callback history before judging
 # been open this long, but only while idle (between transmissions), so it never
 # ages into the degraded state and a recycle never interrupts a live recording.
 _MAX_STREAM_AGE_SEC = 600.0     # recycle an idle stream older than this (10 min)
+# ADC-clock gap deadband. Capture timestamps carry sub-millisecond jitter, so
+# only a gap larger than this counts as the HAL actually skipping hardware
+# buffers. A real dropped buffer is one buffer period (several ms) or more.
+_ADC_GAP_EPSILON_SEC = 0.001
+# Upper bound on how long stop_recording waits for the capture worker to drain
+# the last queued blocks into the clip. The frames are safe in the queue; this
+# only caps the wait so a starved worker cannot hang the caller (Qt) thread.
+_CAPTURE_DRAIN_TIMEOUT_SEC = 2.0
 # When key-ups are merged into one conversation clip, the squelch-closed gap
 # between them is re-inserted as clean silence (up to this cap) instead of being
 # spliced out. Deleting the pauses made conversations run together and sound
@@ -149,6 +157,18 @@ class AudioRecorder:
         # still fires callbacks but delivers far fewer frames than its rate.
         self._cb_frames: int = 0
         self._cb_window_start: float = 0.0
+        # ADC-clock delivery diagnostics (per recording window). These separate
+        # the two candidate causes of under-delivery: hardware/HAL loss (the
+        # device's ADC capture timestamp jumps more than the frames delivered
+        # imply — frames vanished upstream of us) versus callback starvation
+        # (our Python callback runs slow on the real-time audio thread, e.g.
+        # GIL/CPU contention, and misses IO deadlines). Reset with the delivery
+        # window; summarized by _delivery_diagnostics() when a capture degrades.
+        self._prev_adc_time: float = 0.0        # previous callback's ADC timestamp
+        self._prev_cb_n: int = 0                # previous callback's frame count
+        self._diag_skipped_frames: float = 0.0  # frames the HAL skipped (ADC gap)
+        self._diag_max_body_ms: float = 0.0     # slowest callback body seen
+        self._diag_num_cb: int = 0              # callbacks counted this window
         # monotonic time the current input stream was opened; drives proactive
         # recycling of a stream that has been open long enough to risk degrading.
         self._stream_opened_at: float = 0.0
@@ -171,6 +191,23 @@ class AudioRecorder:
         # Processing thread
         self._pt_thread: Optional[threading.Thread] = None
         self._pt_thread_running: bool = False
+
+        # Capture-processing thread. The input callback does the minimum possible
+        # work — copy the raw block and enqueue it — so a slow numpy op or GIL
+        # contention on the real-time audio thread cannot make it miss the IO
+        # deadline and drop hardware frames (the GIL/CPU-starvation failure the
+        # ADC-clock diagnostic surfaced). This thread drains the queue and does
+        # the mono reduction, level metering, channel selection, and chunk /
+        # pass-through routing off the real-time thread.
+        self._cap_raw_buffer: collections.deque = collections.deque()
+        self._cap_thread: Optional[threading.Thread] = None
+        self._cap_thread_running: bool = False
+        # Monotonic counters coordinating stop_recording's drain: the callback is
+        # the sole writer of _cap_enqueued and the processor the sole writer of
+        # _cap_processed, so stop_recording can wait until every block captured
+        # before the stop has reached _chunks without a lock.
+        self._cap_enqueued: int = 0
+        self._cap_processed: int = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -305,10 +342,13 @@ class AudioRecorder:
             self._pause_started = 0.0
             n = int(gap * self._capture_rate)
             if n > 0:
-                # Silence is added at the native capture rate; stop_recording
-                # resamples the whole buffer to 16 kHz uniformly.
-                with self._lock:
-                    self._chunks.append(np.zeros(n, dtype=np.float32))
+                # Enqueue the gap as a sentinel so the capture worker inserts the
+                # silence into _chunks in capture order — between the pre-pause
+                # and post-resume audio — rather than out-of-band ahead of blocks
+                # still queued for processing. Added at the native capture rate;
+                # stop_recording resamples the whole buffer to 16 kHz uniformly.
+                self._cap_raw_buffer.append((None, n))
+                self._cap_enqueued += 1
         self._recording = True
 
     def start_monitoring(self) -> bool:
@@ -382,6 +422,42 @@ class AudioRecorder:
         """Start a fresh frame-rate measurement window (call on (re)open)."""
         self._cb_frames = 0
         self._cb_window_start = time.monotonic()
+        self._prev_adc_time = 0.0
+        self._prev_cb_n = 0
+        self._diag_skipped_frames = 0.0
+        self._diag_max_body_ms = 0.0
+        self._diag_num_cb = 0
+
+    def _delivery_diagnostics(self) -> str:
+        """One-line summary distinguishing HAL frame loss from callback
+        starvation over the current delivery window.
+
+        HAL/device/USB loss shows up as ADC-clock gaps (frames skipped between
+        callbacks) while our callback body stays fast; GIL/CPU starvation shows
+        up as a slow callback body (numpy work on the real-time thread losing
+        the GIL) eating a large fraction of the buffer period. Empty-ish string
+        when no callbacks fired.
+        """
+        if self._diag_num_cb == 0:
+            return "no input callbacks fired (stream dead)"
+        elapsed = max(time.monotonic() - self._cb_window_start, 1e-6)
+        expected = elapsed * self._capture_rate
+        skipped_pct = 100.0 * self._diag_skipped_frames / expected if expected > 0 else 0.0
+        mean_period_ms = (
+            (self._cb_frames / self._diag_num_cb) / self._capture_rate * 1000.0
+            if self._capture_rate > 0 else 0.0
+        )
+        if mean_period_ms > 0 and self._diag_max_body_ms >= 0.5 * mean_period_ms:
+            hint = ("callback body slow vs %.1fms buffer period — suspect "
+                    "GIL/CPU starvation" % mean_period_ms)
+        elif self._diag_skipped_frames > 0:
+            hint = "callback body fast — loss is upstream (device/HAL/USB)"
+        else:
+            hint = "no ADC-clock gaps — delivery shortfall not explained by drops"
+        return ("ADC-skipped ~%.0f frames (%.0f%%), max callback body %.1fms "
+                "over %d callbacks; %s"
+                % (self._diag_skipped_frames, skipped_pct,
+                   self._diag_max_body_ms, self._diag_num_cb, hint))
 
     def _stream_underdelivering(self) -> bool:
         """True if the stream is alive but delivering far fewer frames than its
@@ -451,6 +527,11 @@ class AudioRecorder:
         self._recording = False
         self._active = False
 
+        # Drain the capture pipeline so every recorded block (and any gap
+        # sentinel) has been processed into _chunks before we snapshot it — the
+        # mono reduction and routing run on the worker thread, off the RT path.
+        self._await_capture_drain()
+
         with self._lock:
             chunks = list(self._chunks)
             self._chunks = []
@@ -494,16 +575,20 @@ class AudioRecorder:
         Reopening cannot recover the frames already dropped from this clip.
         """
         degraded, effective_rate = self._recording_underdelivered()
+        diag = self._delivery_diagnostics()
         if not degraded:
+            if self._diag_num_cb:
+                log.debug("AudioRecorder: capture delivery on device %s — %s",
+                          self._device_index, diag)
             return
         wall = time.monotonic() - self._cb_window_start
         log.warning(
             "AudioRecorder: input stream under-delivered during capture on "
             "device %s — %.0f Hz effective vs %d Hz expected (%.0f%%) over "
-            "%.1fs wall; clip is truncated/choppy or dropped. Reopening so "
+            "%.1fs wall; clip is truncated/choppy or dropped. %s. Reopening so "
             "following transmissions capture fully.",
             self._device_index, effective_rate, self._capture_rate,
-            100.0 * effective_rate / self._capture_rate, wall,
+            100.0 * effective_rate / self._capture_rate, wall, diag,
         )
         self._close_stream()
         self._open_stream()
@@ -516,6 +601,7 @@ class AudioRecorder:
         self._stop_pt_thread()
         self._close_out_stream()
         self._close_stream()
+        self._stop_capture_worker()
 
     # ------------------------------------------------------------------
     # Private — noise profile
@@ -682,6 +768,9 @@ class AudioRecorder:
             self._last_callback_ts = time.monotonic()
             self._reset_delivery_window()
             self._stream_opened_at = time.monotonic()
+            # Bring the capture-processing worker up before the stream starts
+            # firing callbacks so the first blocks are drained immediately.
+            self._ensure_capture_worker()
             self._stream.start()
             log.debug("AudioRecorder: stream opened on device %d (%d ch, %d Hz)",
                       self._device_index, self._channels, self._capture_rate)
@@ -710,6 +799,97 @@ class AudioRecorder:
             except Exception:
                 pass
             self._stream = None
+
+    # ------------------------------------------------------------------
+    # Private — capture processing (off the real-time callback thread)
+    # ------------------------------------------------------------------
+
+    def _ensure_capture_worker(self) -> None:
+        """Start the capture-processing thread if it is not already running."""
+        if self._cap_thread is not None and self._cap_thread.is_alive():
+            return
+        self._cap_thread_running = True
+        self._cap_thread = threading.Thread(
+            target=self._capture_processing_loop, daemon=True, name="capture-proc"
+        )
+        self._cap_thread.start()
+
+    def _stop_capture_worker(self) -> None:
+        """Stop the capture-processing thread and discard any unprocessed input."""
+        self._cap_thread_running = False
+        if self._cap_thread is not None:
+            self._cap_thread.join(timeout=1.0)
+            self._cap_thread = None
+        self._cap_raw_buffer.clear()
+
+    def _capture_processing_loop(self) -> None:
+        """Drain queued raw blocks and process each off the real-time thread."""
+        while self._cap_thread_running:
+            try:
+                item = self._cap_raw_buffer.popleft()
+            except IndexError:
+                time.sleep(0.002)
+                continue
+            self._process_capture_item(item)
+
+    def _drain_capture_buffer_once(self) -> None:
+        """Process everything currently queued, synchronously. Used at stop when
+        no worker thread is running (e.g. unit tests)."""
+        while True:
+            try:
+                item = self._cap_raw_buffer.popleft()
+            except IndexError:
+                break
+            self._process_capture_item(item)
+
+    def _await_capture_drain(self) -> None:
+        """Ensure every block enqueued so far has reached _chunks before the
+        caller snapshots it. The worker drains when running; otherwise we drain
+        inline. Bounded so a starved worker cannot hang the caller."""
+        if self._cap_thread is not None and self._cap_thread.is_alive():
+            target = self._cap_enqueued
+            deadline = time.monotonic() + _CAPTURE_DRAIN_TIMEOUT_SEC
+            while self._cap_processed < target and time.monotonic() < deadline:
+                time.sleep(0.002)
+            if self._cap_processed < target:
+                log.warning(
+                    "AudioRecorder: capture worker did not drain in time "
+                    "(%d/%d blocks processed) — clip may be truncated",
+                    self._cap_processed, target,
+                )
+        else:
+            self._drain_capture_buffer_once()
+
+    def _process_capture_item(self, item) -> None:
+        """Reduce one queued block to mono, update the level meter, and route it
+        to the recording buffer and/or pass-through. Runs off the RT thread.
+
+        item is either (raw_block, was_recording) or (None, n_silence) — the
+        latter a gap sentinel enqueued by resume_recording so the re-inserted
+        silence lands in _chunks in capture order, between the pre-pause and
+        post-resume audio rather than out-of-band ahead of still-queued blocks.
+        """
+        raw, flag = item
+        if raw is None:
+            with self._lock:
+                self._chunks.append(np.zeros(int(flag), dtype=np.float32))
+            self._cap_processed += 1
+            return
+        mono = self._to_mono(raw) if raw.size else raw
+        # Track input level for the meter (peak with fast attack / slow decay),
+        # measured on the DC-blocked mono signal.
+        if mono.size:
+            block_peak = float(np.max(np.abs(mono)))
+            if block_peak >= self._level:
+                self._level = block_peak
+            else:
+                self._level += (block_peak - self._level) * 0.2
+        if flag:
+            with self._lock:
+                self._chunks.append(mono.copy())
+        if self._passthrough:
+            self._pt_raw_buffer.append(mono.copy())
+        self._cap_processed += 1
 
     # ------------------------------------------------------------------
     # Private — callbacks
@@ -770,31 +950,52 @@ class AudioRecorder:
         time_info,
         status,
     ) -> None:
-        """sounddevice input callback — runs on C audio thread."""
+        """sounddevice input callback — runs on the C real-time audio thread.
+
+        Kept as short as possible: copy the raw block, enqueue it, update the
+        cheap accounting, and return. All numpy work (mono reduction, level
+        metering, channel selection) and chunk routing happen on the capture-
+        processing thread, so contention there can never make this callback miss
+        its IO deadline and drop hardware frames.
+        """
         # Liveness heartbeat: a healthy stream fires this continuously, so
         # start_recording() can tell a live stream from a dead one.
-        self._last_callback_ts = time.monotonic()
+        t_entry = time.monotonic()
+        self._last_callback_ts = t_entry
         # Frame accounting for the under-delivery watchdog (see
         # _stream_underdelivering). Counts frames actually handed to us, which
         # is what drops when a long-lived stream degrades.
         self._cb_frames += frames
-        mono = self._to_mono(indata) if indata.size else indata
-        # Track input level for the meter (peak with fast attack / slow decay).
-        # Measured on the DC-blocked mono signal so a constant input bias no
-        # longer holds the meter off zero when nothing is being received.
-        if mono.size:
-            block_peak = float(np.max(np.abs(mono)))
-            if block_peak >= self._level:
-                self._level = block_peak
-            else:
-                self._level += (block_peak - self._level) * 0.2
+        self._diag_num_cb += 1
+        # ADC-clock gap accounting: if the device's capture timestamp advanced
+        # by more than the previous buffer's duration, the HAL skipped hardware
+        # frames between callbacks — loss upstream of us (device/USB), not our
+        # scheduling. time_info is None under unit tests and its field access is
+        # via CFFI, so guard defensively — this must never throw on the RT thread.
+        if time_info is not None and self._capture_rate > 0:
+            try:
+                adc = float(time_info.inputBufferAdcTime)
+            except Exception:
+                adc = 0.0
+            if adc > 0.0 and self._prev_adc_time > 0.0 and self._prev_cb_n > 0:
+                gap = (adc - self._prev_adc_time) - (self._prev_cb_n / self._capture_rate)
+                if gap > _ADC_GAP_EPSILON_SEC:
+                    self._diag_skipped_frames += gap * self._capture_rate
+            self._prev_adc_time = adc
+            self._prev_cb_n = frames
         if status:
             log.debug("AudioRecorder callback status: %s", status)
-        if self._recording:
-            with self._lock:
-                self._chunks.append(mono.copy())
-        if self._passthrough:
-            self._pt_raw_buffer.append(mono.copy())
+        # Hand the raw block off. The copy is mandatory — sounddevice reuses
+        # indata after we return. Tag with the recording state at capture time so
+        # a later flag flip can't misroute this block.
+        self._cap_raw_buffer.append((indata.copy(), self._recording))
+        self._cap_enqueued += 1
+        # Slowest callback body over the window. Now that the body is just a copy
+        # and an enqueue, a body still eating a large slice of the buffer period
+        # points at GIL/CPU starvation upstream of us rather than our own work.
+        body_ms = (time.monotonic() - t_entry) * 1000.0
+        if body_ms > self._diag_max_body_ms:
+            self._diag_max_body_ms = body_ms
 
     def _output_callback(
         self,

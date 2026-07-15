@@ -141,6 +141,60 @@ def test_underdelivered_capture_reopens_stream():
     assert r._reopens == 1                   # degraded stream reopened for next time
 
 
+def test_capture_worker_processes_and_drains():
+    """End-to-end through the background worker: raw blocks enqueued by the
+    callback are reduced to mono and drained into the clip by stop_recording."""
+    import time
+    r = _capture_recorder()
+    r._ensure_capture_worker()
+    try:
+        r._cb_window_start = time.monotonic()
+        r.start_recording()
+        for _ in range(3):
+            _feed(r, 48_000)               # 1s @48k each → 3s total
+            time.sleep(0.01)
+        audio = r.stop_recording()
+    finally:
+        r._stop_capture_worker()
+    assert audio is not None
+    assert abs(len(audio) - 48_000) < 200   # ~3s resampled to 16k
+    assert r._cap_processed == r._cap_enqueued  # fully drained
+
+
+class _FakeTimeInfo:
+    """Minimal stand-in for PortAudio's PaStreamCallbackTimeInfo."""
+    def __init__(self, adc: float) -> None:
+        self.inputBufferAdcTime = adc
+
+
+def test_adc_gap_accounting_flags_hal_skips_upstream():
+    r = _capture_recorder()
+    r._reset_delivery_window()
+    n = 4800                                   # 0.1s @ 48k
+    z = np.zeros((n, 1), dtype=np.float32)
+    # Three contiguous buffers: ADC advances by exactly the buffer duration.
+    for i in range(3):
+        r._audio_callback(z, n, _FakeTimeInfo((i + 1) * 0.1), None)
+    assert r._diag_skipped_frames == 0         # no gaps yet
+    # Fourth buffer's ADC jumps 0.5s instead of 0.1s → 0.4s of frames skipped.
+    r._audio_callback(z, n, _FakeTimeInfo(0.3 + 0.5), None)
+    assert abs(r._diag_skipped_frames - 0.4 * 48_000) < 1
+    # Fast callback body + real ADC gaps ⇒ classifier blames upstream loss.
+    assert "upstream" in r._delivery_diagnostics()
+
+
+def test_adc_accounting_noop_without_time_info():
+    """time_info=None (the unit-test path and some backends) must not skew or
+    throw — the frame watchdog still works, only the ADC breakdown is absent."""
+    r = _capture_recorder()
+    r._reset_delivery_window()
+    z = np.zeros((4800, 1), dtype=np.float32)
+    for _ in range(3):
+        r._audio_callback(z, 4800, None, None)
+    assert r._diag_skipped_frames == 0
+    assert r._diag_num_cb == 3
+
+
 def test_severe_truncation_below_min_duration_still_reopens():
     """The worst case: a stream so degraded the clip is discarded as too short
     must STILL reopen — the early return used to skip the health check."""
