@@ -95,3 +95,72 @@ def test_mono_passthrough_dc_blocked():
     out = r._to_mono(sig)
     assert out.ndim == 1
     assert abs(float(out.mean())) < 1e-6   # DC removed
+
+
+# ----------------------------------------------------------------------
+# Per-recording under-delivery detection (stop_recording reopens a stream
+# that delivered far fewer frames than wall-clock during the capture — the
+# blind spot that truncated a 19s transmission into a choppy 4s clip while
+# the idle-gap watchdog in start_recording saw a healthy stream).
+# ----------------------------------------------------------------------
+
+def _capture_recorder() -> AudioRecorder:
+    r = AudioRecorder()
+    r._device_index = 0
+    r._capture_rate = 48_000
+    r._stream = object()               # pretend an input stream is open
+    r._stream_is_live = lambda: True   # and healthy at start_recording
+    r._reopens = 0
+
+    def _fake_open() -> bool:
+        r._reopens += 1
+        r._stream = object()
+        return True
+
+    r._open_stream = _fake_open        # count reopens instead of touching HW
+    r._close_stream = lambda: None
+    return r
+
+
+def _feed(r: AudioRecorder, n: int) -> None:
+    """Deliver n native-rate frames through the input callback."""
+    t = np.arange(n)
+    sig = (0.3 * np.sin(2 * np.pi * 300 * t / 48_000)).astype(np.float32)
+    r._audio_callback(sig.reshape(-1, 1), n, None, None)
+
+
+def test_underdelivered_capture_reopens_stream():
+    import time
+    r = _capture_recorder()
+    r._cb_window_start = time.monotonic()   # healthy idle window at start
+    r.start_recording()
+    _feed(r, 200_000)                        # ~4.2s of 48k frames actually arrived
+    r._cb_window_start -= 19.0               # but they spanned ~19s of wall-clock
+    audio = r.stop_recording()
+    assert audio is not None                 # clip is still returned
+    assert r._reopens == 1                   # degraded stream reopened for next time
+
+
+def test_full_delivery_does_not_reopen():
+    import time
+    r = _capture_recorder()
+    r._cb_window_start = time.monotonic()
+    r.start_recording()
+    _feed(r, 240_000)                        # 5s of 48k frames
+    r._cb_window_start -= 5.0                 # delivered over ~5s wall — full rate
+    audio = r.stop_recording()
+    assert audio is not None
+    assert r._reopens == 0                    # healthy stream left alone
+
+
+def test_short_capture_not_judged():
+    """A capture shorter than the measurement window is never flagged."""
+    import time
+    r = _capture_recorder()
+    r._cb_window_start = time.monotonic()
+    r.start_recording()
+    _feed(r, 150_000)                         # ~3.1s @48k → ~1.04s @16k
+    r._cb_window_start -= 2.0                  # under _UNDERDELIVERY_WINDOW_SEC
+    audio = r.stop_recording()
+    assert audio is not None
+    assert r._reopens == 0

@@ -252,6 +252,11 @@ class AudioRecorder:
                 return
         with self._lock:
             self._chunks = []
+        # Start a fresh frame-delivery window at the moment recording begins so
+        # stop_recording() can measure how fully the stream delivered *this*
+        # transmission (see _recording_underdelivered). The health checks above
+        # measured the idle gap before this call; this measures the capture.
+        self._reset_delivery_window()
         self._active = True
         self._recording = True
         self._pause_started = 0.0
@@ -406,6 +411,33 @@ class AudioRecorder:
             )
         return degraded
 
+    def _recording_underdelivered(self) -> tuple[bool, float]:
+        """Measure how fully the stream delivered the just-finished recording.
+
+        _stream_underdelivering() only runs at the *start* of a transmission,
+        over the idle gap before it, so a stream that delivers fine while idle
+        but collapses under capture load slips past it and truncates a long
+        transmission into a choppy few-second clip. This runs at stop_recording
+        over the recording window (reset in start_recording), catching exactly
+        that case.
+
+        Frame accounting counts every callback, including any while paused, so
+        this reflects raw stream health (frames vs wall-clock) and is not
+        confused by pause-gated gaps. Returns (degraded, effective_rate_hz);
+        judges nothing until _UNDERDELIVERY_WINDOW_SEC of history has accrued.
+
+        Reopening cannot un-drop this clip's audio, but it keeps the degraded
+        stream from truncating every following transmission too.
+        """
+        if self._stream is None or self._capture_rate <= 0:
+            return (False, 0.0)
+        elapsed = time.monotonic() - self._cb_window_start
+        if elapsed < _UNDERDELIVERY_WINDOW_SEC:
+            return (False, 0.0)  # too short to judge reliably
+        effective_rate = self._cb_frames / elapsed
+        degraded = effective_rate < self._capture_rate * _UNDERDELIVERY_FRACTION
+        return (degraded, effective_rate)
+
     def stop_recording(self) -> Optional[np.ndarray]:
         """
         Stop accumulating audio and return the captured data.
@@ -442,6 +474,27 @@ class AudioRecorder:
 
         log.debug("AudioRecorder: captured %.2fs of audio (%d Hz → %d Hz)",
                   duration, self._capture_rate, SAMPLE_RATE)
+
+        # The stream may have delivered far fewer frames than wall-clock implies
+        # during this capture (load-induced degradation the idle-gap watchdog in
+        # start_recording cannot see). That already truncated this clip; reopen
+        # a fresh stream now, while idle, so the next transmission is not also
+        # truncated. The clip is returned regardless — the downstream
+        # hallucination filter handles whatever the mangled audio transcribes to.
+        degraded, effective_rate = self._recording_underdelivered()
+        if degraded:
+            wall = time.monotonic() - self._cb_window_start
+            log.warning(
+                "AudioRecorder: input stream under-delivered during capture on "
+                "device %s — %.0f Hz effective vs %d Hz expected (%.0f%%) over "
+                "%.1fs wall; clip is truncated/choppy. Reopening so following "
+                "transmissions capture fully.",
+                self._device_index, effective_rate, self._capture_rate,
+                100.0 * effective_rate / self._capture_rate, wall,
+            )
+            self._close_stream()
+            self._open_stream()
+
         return audio
 
     def close(self) -> None:
