@@ -141,6 +141,20 @@ def test_underdelivered_capture_reopens_stream():
     assert r._reopens == 1                   # degraded stream reopened for next time
 
 
+def test_severe_truncation_below_min_duration_still_reopens():
+    """The worst case: a stream so degraded the clip is discarded as too short
+    must STILL reopen — the early return used to skip the health check."""
+    import time
+    r = _capture_recorder()
+    r._cb_window_start = time.monotonic()
+    r.start_recording()
+    _feed(r, 30_000)                          # ~0.63s @48k → ~0.63s @16k (< 1.0)
+    r._cb_window_start -= 19.0                 # over ~19s wall — badly degraded
+    audio = r.stop_recording()
+    assert audio is None                       # too short, discarded
+    assert r._reopens == 1                     # but the stream was still reopened
+
+
 def test_full_delivery_does_not_reopen():
     import time
     r = _capture_recorder()
