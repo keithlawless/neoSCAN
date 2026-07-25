@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from app.serial.protocol import ScannerProtocol, ProtocolError
+from app.serial.protocol import ScannerProtocol, ProtocolError, SerialConnectionLost
 
 if TYPE_CHECKING:
     from app.data.radio_connection import RadioConnection
@@ -121,6 +121,7 @@ class LogPanel(QWidget):
     """
 
     channel_info_updated = pyqtSignal(str, dict)   # (radio_label, channel_info)
+    radio_connection_lost = pyqtSignal(str)        # radio_label — serial device gone
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -285,6 +286,7 @@ class LogPanel(QWidget):
 
     def _poll(self) -> None:
         now_mono = time.monotonic()
+        lost_labels: list[str] = []
         for radio in list(self._radios):
             if radio.label in self._paused_labels:
                 continue
@@ -346,8 +348,17 @@ class LogPanel(QWidget):
                         if closed_for >= CONVERSATION_GAP_MS / 1000.0:
                             # Grace window elapsed with no re-key — finalize.
                             self._finalize_entry(radio, label)
+            except SerialConnectionLost:
+                # The serial device dropped out (e.g. USB adapter unplugged).
+                # Defer teardown until the loop finishes so we don't mutate
+                # self._radios mid-iteration, then notify the main window.
+                log.warning("Lost serial connection to %s — disconnecting", radio.label)
+                lost_labels.append(radio.label)
             except Exception:
                 log.exception("Error polling %s — continuing", radio.label)
+
+        for label in lost_labels:
+            self.radio_connection_lost.emit(label)
 
     @staticmethod
     def _same_source(entry: _TransmissionEntry, info: dict) -> bool:
