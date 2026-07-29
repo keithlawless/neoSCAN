@@ -95,3 +95,140 @@ def test_mono_passthrough_dc_blocked():
     out = r._to_mono(sig)
     assert out.ndim == 1
     assert abs(float(out.mean())) < 1e-6   # DC removed
+
+
+# ----------------------------------------------------------------------
+# Per-recording under-delivery detection (stop_recording reopens a stream
+# that delivered far fewer frames than wall-clock during the capture — the
+# blind spot that truncated a 19s transmission into a choppy 4s clip while
+# the idle-gap watchdog in start_recording saw a healthy stream).
+# ----------------------------------------------------------------------
+
+def _capture_recorder() -> AudioRecorder:
+    r = AudioRecorder()
+    r._device_index = 0
+    r._capture_rate = 48_000
+    r._stream = object()               # pretend an input stream is open
+    r._stream_is_live = lambda: True   # and healthy at start_recording
+    r._reopens = 0
+
+    def _fake_open() -> bool:
+        r._reopens += 1
+        r._stream = object()
+        return True
+
+    r._open_stream = _fake_open        # count reopens instead of touching HW
+    r._close_stream = lambda: None
+    return r
+
+
+def _feed(r: AudioRecorder, n: int) -> None:
+    """Deliver n native-rate frames through the input callback."""
+    t = np.arange(n)
+    sig = (0.3 * np.sin(2 * np.pi * 300 * t / 48_000)).astype(np.float32)
+    r._audio_callback(sig.reshape(-1, 1), n, None, None)
+
+
+def test_underdelivered_capture_reopens_stream():
+    import time
+    r = _capture_recorder()
+    r._cb_window_start = time.monotonic()   # healthy idle window at start
+    r.start_recording()
+    _feed(r, 200_000)                        # ~4.2s of 48k frames actually arrived
+    r._cb_window_start -= 19.0               # but they spanned ~19s of wall-clock
+    audio = r.stop_recording()
+    assert audio is not None                 # clip is still returned
+    assert r._reopens == 1                   # degraded stream reopened for next time
+
+
+def test_capture_worker_processes_and_drains():
+    """End-to-end through the background worker: raw blocks enqueued by the
+    callback are reduced to mono and drained into the clip by stop_recording."""
+    import time
+    r = _capture_recorder()
+    r._ensure_capture_worker()
+    try:
+        r._cb_window_start = time.monotonic()
+        r.start_recording()
+        for _ in range(3):
+            _feed(r, 48_000)               # 1s @48k each → 3s total
+            time.sleep(0.01)
+        audio = r.stop_recording()
+    finally:
+        r._stop_capture_worker()
+    assert audio is not None
+    assert abs(len(audio) - 48_000) < 200   # ~3s resampled to 16k
+    assert r._cap_processed == r._cap_enqueued  # fully drained
+
+
+class _FakeTimeInfo:
+    """Minimal stand-in for PortAudio's PaStreamCallbackTimeInfo."""
+    def __init__(self, adc: float) -> None:
+        self.inputBufferAdcTime = adc
+
+
+def test_adc_gap_accounting_flags_hal_skips_upstream():
+    r = _capture_recorder()
+    r._reset_delivery_window()
+    n = 4800                                   # 0.1s @ 48k
+    z = np.zeros((n, 1), dtype=np.float32)
+    # Three contiguous buffers: ADC advances by exactly the buffer duration.
+    for i in range(3):
+        r._audio_callback(z, n, _FakeTimeInfo((i + 1) * 0.1), None)
+    assert r._diag_skipped_frames == 0         # no gaps yet
+    # Fourth buffer's ADC jumps 0.5s instead of 0.1s → 0.4s of frames skipped.
+    r._audio_callback(z, n, _FakeTimeInfo(0.3 + 0.5), None)
+    assert abs(r._diag_skipped_frames - 0.4 * 48_000) < 1
+    # Fast callback body + real ADC gaps ⇒ classifier blames upstream loss.
+    assert "upstream" in r._delivery_diagnostics()
+
+
+def test_adc_accounting_noop_without_time_info():
+    """time_info=None (the unit-test path and some backends) must not skew or
+    throw — the frame watchdog still works, only the ADC breakdown is absent."""
+    r = _capture_recorder()
+    r._reset_delivery_window()
+    z = np.zeros((4800, 1), dtype=np.float32)
+    for _ in range(3):
+        r._audio_callback(z, 4800, None, None)
+    assert r._diag_skipped_frames == 0
+    assert r._diag_num_cb == 3
+
+
+def test_severe_truncation_below_min_duration_still_reopens():
+    """The worst case: a stream so degraded the clip is discarded as too short
+    must STILL reopen — the early return used to skip the health check."""
+    import time
+    r = _capture_recorder()
+    r._cb_window_start = time.monotonic()
+    r.start_recording()
+    _feed(r, 30_000)                          # ~0.63s @48k → ~0.63s @16k (< 1.0)
+    r._cb_window_start -= 19.0                 # over ~19s wall — badly degraded
+    audio = r.stop_recording()
+    assert audio is None                       # too short, discarded
+    assert r._reopens == 1                     # but the stream was still reopened
+
+
+def test_full_delivery_does_not_reopen():
+    import time
+    r = _capture_recorder()
+    r._cb_window_start = time.monotonic()
+    r.start_recording()
+    _feed(r, 240_000)                        # 5s of 48k frames
+    r._cb_window_start -= 5.0                 # delivered over ~5s wall — full rate
+    audio = r.stop_recording()
+    assert audio is not None
+    assert r._reopens == 0                    # healthy stream left alone
+
+
+def test_short_capture_not_judged():
+    """A capture shorter than the measurement window is never flagged."""
+    import time
+    r = _capture_recorder()
+    r._cb_window_start = time.monotonic()
+    r.start_recording()
+    _feed(r, 150_000)                         # ~3.1s @48k → ~1.04s @16k
+    r._cb_window_start -= 2.0                  # under _UNDERDELIVERY_WINDOW_SEC
+    audio = r.stop_recording()
+    assert audio is not None
+    assert r._reopens == 0

@@ -544,6 +544,12 @@ class TranscriptionManager(QObject):
         """True while the input stream is delivering audio (meter active)."""
         return self._recorder.is_capturing_audio()
 
+    def maybe_recycle_stream(self) -> None:
+        """Recycle the input stream if it has been open long enough to risk
+        age-related degradation. No-op while a capture session is active, so it
+        is safe to call every poll for an idle radio."""
+        self._recorder.recycle_if_idle_and_stale()
+
     def on_transmission_started(self) -> None:
         if not self._enabled:
             return

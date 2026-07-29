@@ -17,6 +17,7 @@ drive this from a QThread so the UI remains responsive.
 from __future__ import annotations
 
 import logging
+import termios
 import time
 from typing import Optional
 
@@ -33,6 +34,16 @@ _SLOW_COMMANDS = {"CLR", "DSY", "DLT"}
 
 class ProtocolError(Exception):
     """Raised when the scanner returns ERR or no response."""
+
+
+class SerialConnectionLost(ProtocolError):
+    """
+    Raised when the underlying serial device fails at the OS level — e.g. the
+    USB adapter was unplugged ("Device not configured"). Distinct from a plain
+    ProtocolError (ERR / timeout) so callers can tear the connection down rather
+    than treat it as a transient command failure. Subclasses ProtocolError so
+    existing ``except ProtocolError`` handlers still swallow it and never crash.
+    """
 
 
 class ScannerProtocol:
@@ -73,10 +84,20 @@ class ScannerProtocol:
 
         timeout = SLOW_COMMAND_TIMEOUT if cmd in _SLOW_COMMANDS else COMMAND_TIMEOUT
 
-        self._conn.reset_input_buffer()
-        self._conn.write(raw.encode("ascii"))
+        try:
+            self._conn.reset_input_buffer()
+            self._conn.write(raw.encode("ascii"))
 
-        response = self._read_line(timeout)
+            response = self._read_line(timeout)
+        except (serial.SerialException, OSError, termios.error) as exc:
+            # The serial device dropped out from under us (e.g. USB adapter
+            # unplugged — "Device not configured"). Surface it as a
+            # SerialConnectionLost so callers can tear the connection down;
+            # existing ``except ProtocolError`` handlers still catch it and
+            # never crash.
+            raise SerialConnectionLost(
+                f"Serial I/O failed for command {full_cmd!r}: {exc}"
+            ) from exc
         log.debug("RX: %r", response)
 
         if not response:
@@ -168,6 +189,10 @@ class ScannerProtocol:
         """
         try:
             payload = self.send_command("GLG")
+        except SerialConnectionLost:
+            # Device is gone — let this propagate so the poll loop can tear the
+            # connection down, rather than masking it as an idle scanner.
+            raise
         except Exception:
             return None
         if not payload or payload.startswith("NG"):

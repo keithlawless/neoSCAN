@@ -295,6 +295,7 @@ class MainWindow(QMainWindow):
 
         self._log_panel = LogPanel()
         self._log_panel.channel_info_updated.connect(self._on_channel_info_updated)
+        self._log_panel.radio_connection_lost.connect(self._on_radio_connection_lost)
 
         rc_splitter.addWidget(self._radio_tabs)
         rc_splitter.addWidget(self._log_panel)
@@ -671,7 +672,14 @@ class MainWindow(QMainWindow):
         radio = self._active_radio()
         if radio is None:
             return
+        self._teardown_radio(radio)
+        self._update_connection_ui()
+        self.statusBar().showMessage("Disconnected", 3000)
 
+    def _teardown_radio(self, radio: RadioConnection) -> None:
+        """Remove a radio and release all its resources. Shared by user-initiated
+        disconnect and automatic disconnect on serial connection loss. Does not
+        update the status bar — callers post the appropriate message."""
         # Remove from log panel (ends active transmissions).
         self._log_panel.remove_radio(radio.label)
 
@@ -695,11 +703,27 @@ class MainWindow(QMainWindow):
         if idx >= 0:
             self._radio_picker.removeItem(idx)
 
-        self._radios.remove(radio)
+        if radio in self._radios:
+            self._radios.remove(radio)
         port_manager.close_port(radio.conn)
 
+    def _on_radio_connection_lost(self, label: str) -> None:
+        """The log panel detected that a radio's serial device dropped out
+        (e.g. USB adapter unplugged). Tear it down and inform the user."""
+        radio = next((r for r in self._radios if r.label == label), None)
+        if radio is None:
+            return  # already removed
+        model = radio.scanner_model or "scanner"
+        port = radio.port_name
+        self._teardown_radio(radio)
         self._update_connection_ui()
-        self.statusBar().showMessage("Disconnected", 3000)
+        self.statusBar().showMessage(f"Lost connection to {label} ({port})", 5000)
+        QMessageBox.warning(
+            self, "Scanner Disconnected",
+            f"Lost the connection to {label} ({model} on {port}).\n\n"
+            "The device may have been unplugged or powered off. "
+            "Reconnect it and use Scanner → Connect to resume.",
+        )
 
     # ------------------------------------------------------------------
     # Upload / Download

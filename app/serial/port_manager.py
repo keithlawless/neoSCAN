@@ -57,4 +57,10 @@ def open_port(port_name: str) -> serial.Serial:
 def close_port(conn: serial.Serial | None) -> None:
     """Safely close an open serial connection."""
     if conn and conn.is_open:
-        conn.close()
+        try:
+            conn.close()
+        except (serial.SerialException, OSError):
+            # The device may already be gone (e.g. unplugged), in which case
+            # the OS-level close can fail. Nothing more we can do — treat it
+            # as closed.
+            pass
