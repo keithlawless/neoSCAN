@@ -2,6 +2,21 @@
 
 ---
 
+## v1.4.3 — 2026-07-29
+
+### Audio capture reliability
+
+- **Long transmissions are captured in full instead of a few choppy seconds**: the audio input callback ran all of its per-buffer work — DC filtering, per-channel level measurement, active-channel selection and metering — directly on the operating system's real-time audio thread. Under CPU load that work stretched to four or five times the time available between buffers, so the sound system dropped hardware buffers and a 19-second transmission arrived as a fragmented 4-second clip that Whisper turned into hallucinated text. The callback now only copies the incoming audio and hands it to a background worker, which cut frame loss from roughly 20% to 7% and restored full-length capture on long transmissions
+- **Input streams are refreshed before they can go bad**: an audio input stream left open for hours keeps signalling that it is alive while quietly delivering only a fraction of its audio, which turned long transmissions into a few seconds of fragmented sound. Each radio's input stream is now recycled once it has been open for 10 minutes, but only while that radio is idle between transmissions — so a stream never gets old enough to degrade, and a refresh never interrupts a recording
+- **A stream that collapses mid-transmission now heals itself**: the previous degradation check only measured delivery during the idle gap *before* a transmission, so a stream that looked healthy while idle but collapsed under recording load was never caught and could truncate every transmission that followed. Delivery is now also measured across the recording itself, and a capture that comes up short reopens the stream — including when the resulting clip was too short or too empty to keep, which is exactly the case that needs it most. The clip already in progress can't be recovered, but the damage stops at one
+- **Capture problems now identify themselves in the log**: every capture reports whether missing audio was dropped by the sound device before it reached NeoSCAN or lost to CPU contention inside it, so choppy audio can be diagnosed from the log rather than guessed at
+
+### Remote control
+
+- **A dropped USB connection no longer crashes the app**: if the scanner's serial port disappeared — cable unplugged, adapter re-enumerated — opening that radio's Remote Control tab crashed NeoSCAN with a low-level serial error that slipped past its error handling. The loss is now caught and reported: that radio alone is disconnected, its controls are reset, and a warning prompts you to reconnect, while any other connected radios keep running
+
+---
+
 ## v1.4.2 — 2026-07-13
 
 ### Conversation merging and audio-capture reliability
