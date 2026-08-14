@@ -23,6 +23,7 @@ from PyQt6.QtCore import (
     QMutex,
     QMutexLocker,
     QObject,
+    QSemaphore,
     QThread,
     QWaitCondition,
     pyqtSignal,
@@ -42,6 +43,16 @@ _DEFAULT_SERVER_URL = "http://localhost:8000"
 _MAX_QUEUE_DEPTH = 10   # drop new jobs rather than let memory and latency grow unbounded
 _MAX_AUDIO_SECS = 60    # cap audio sent to server at this many seconds
 _DEFAULT_VAD = False    # scanner audio is already squelch-gated; VAD tends to drop real speech
+
+# Each radio gets its own TranscriberWorker thread, and _process() below does
+# GIL-holding numpy work (normalize, has-speech) plus a blocking HTTP call.
+# When multiple radios' workers do this at once, they starve the real-time
+# audio capture callback of GIL time, which is what AudioRecorder's
+# under-delivery warning ("suspect GIL/CPU starvation") is detecting. Capping
+# how many workers may be inside _process() at the same time, process-wide,
+# keeps that contention bounded regardless of how many radios are busy.
+_MAX_CONCURRENT_TRANSCRIPTIONS = 1
+_transcription_slots = QSemaphore(_MAX_CONCURRENT_TRANSCRIPTIONS)
 
 # Loudness normalization. The reference level is a high percentile of the
 # sample magnitude rather than the single peak or the RMS: a percentile ignores
@@ -287,7 +298,13 @@ class TranscriberWorker(QThread):
             job = self._queue.pop(0)
             self._mutex.unlock()
 
-            self._process(job)
+            # Block here, not inside _process(), so a worker waiting for its
+            # turn doesn't hold the queue mutex and can still be stopped.
+            _transcription_slots.acquire()
+            try:
+                self._process(job)
+            finally:
+                _transcription_slots.release()
 
     def _post(self, audio_bytes: bytes, vad: bool) -> dict:
         """Send one raw-f32-16k clip to the whisper-wrapper server.
