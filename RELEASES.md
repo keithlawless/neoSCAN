@@ -2,6 +2,14 @@
 
 ---
 
+## v1.4.4 — 2026-08-14
+
+### Audio capture reliability
+
+- **Busy periods no longer chop up recordings**: each radio transcribes on its own background thread, and that work — loudness normalisation, speech detection, and the wait for the transcription server to answer — competes for the interpreter with the live audio capture running alongside it. Once several radios were talking at the same time, that competition starved the capture callback and corrupted whatever was being recorded at that moment, which is what the "GIL/CPU starvation" warnings appearing in the log each morning were reporting. Transcription now runs one clip at a time across all radios, so capture stays clean however many radios are busy. During heavy traffic clips wait their turn in the queue instead of degrading each other
+
+---
+
 ## v1.4.3 — 2026-07-29
 
 ### Audio capture reliability
