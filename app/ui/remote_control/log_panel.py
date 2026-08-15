@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QMutex, QMutexLocker, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -51,6 +51,16 @@ CONVERSATION_GAP_MS = 3000
 # this long. Must be < CONVERSATION_GAP_MS. The cost is up to this much squelch-tail
 # audio at the end of each clip, so keep it small.
 CAPTURE_PAUSE_DEBOUNCE_MS = 500
+
+# While a transmission is in progress the duration cell ticks up. Repainting it
+# at the poll rate meant ~7 table updates per second per active radio on the
+# main thread — GIL-holding Qt work competing with the audio callback, which is
+# the mechanism behind "transcription degrades while the Remote Control tab is
+# open". The cell shows tenths of a second, so refreshing it this often is
+# indistinguishable to the eye and costs a fraction as much. Rows are also not
+# refreshed at all while the panel is hidden; the value is recomputed from the
+# entry whenever it next becomes visible.
+_ACTIVE_ROW_REFRESH_MS = 500
 
 # Log table columns
 COL_RADIO = 0
@@ -113,6 +123,89 @@ class _TransmissionEntry:
             return self.frequency
 
 
+class _PollWorker(QThread):
+    """Runs the scanner GLG poll on a background thread.
+
+    Polling used to run on a main-thread QTimer, so every tick blocked the Qt
+    event loop for the duration of up to three serial round-trips — and for the
+    full 3 s command timeout whenever a radio went unresponsive. Nothing else on
+    the main thread (UI repaints, and the Python audio callbacks that need the
+    GIL) could run meanwhile.
+
+    This thread does only the serial I/O and hands the results back via a
+    queued signal; all state-machine and UI work stays on the main thread where
+    it belongs. ``ScannerProtocol`` serialises the port internally, so keypad
+    commands issued from the main thread interleave safely with these polls.
+    """
+
+    polled = pyqtSignal(list)   # [(label, info | None, connection_lost: bool)]
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._mutex = QMutex()
+        self._radios: list[RadioConnection] = []
+        self._paused: set[str] = set()
+        self._running = True
+
+    def set_radios(self, radios: list[RadioConnection]) -> None:
+        with QMutexLocker(self._mutex):
+            self._radios = list(radios)
+
+    def set_paused(self, paused: set[str]) -> None:
+        with QMutexLocker(self._mutex):
+            self._paused = set(paused)
+
+    def stop(self) -> None:
+        """Ask the loop to exit. Caller should then wait() on the thread."""
+        with QMutexLocker(self._mutex):
+            self._running = False
+
+    def start(self, *args, **kwargs) -> None:  # type: ignore[override]
+        # Clear the stop flag so the worker can be restarted after a shutdown
+        # (disconnect all radios, then reconnect one).
+        with QMutexLocker(self._mutex):
+            self._running = True
+        super().start(*args, **kwargs)
+
+    def run(self) -> None:
+        while True:
+            started = time.monotonic()
+            with QMutexLocker(self._mutex):
+                if not self._running:
+                    return
+                radios = list(self._radios)
+
+            results: list[tuple[str, Optional[dict], bool]] = []
+            for radio in radios:
+                # Re-check membership and pause state immediately before each
+                # transaction rather than once per cycle: a radio disconnected
+                # mid-cycle must not be touched again, or we would be reading a
+                # port the main thread is about to close.
+                with QMutexLocker(self._mutex):
+                    if not self._running or radio not in self._radios:
+                        continue
+                    if radio.label in self._paused:
+                        continue
+                try:
+                    results.append(
+                        (radio.label, radio.proto.get_received_channel_info(), False)
+                    )
+                except SerialConnectionLost:
+                    # Report it and let the main thread tear the radio down; do
+                    # not keep hammering a device that has gone away.
+                    results.append((radio.label, None, True))
+                except Exception:
+                    log.exception("Error polling %s — continuing", radio.label)
+
+            if results:
+                self.polled.emit(results)
+
+            # Pace from the start of the cycle so slow radios don't compound
+            # into a slower and slower poll rate.
+            remaining_ms = POLL_INTERVAL_MS - (time.monotonic() - started) * 1000.0
+            self.msleep(max(1, int(remaining_ms)))
+
+
 class LogPanel(QWidget):
     """
     Polls one or more scanners for active transmissions and displays a merged log.
@@ -126,10 +219,12 @@ class LogPanel(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._radios: list[RadioConnection] = []
-        self._timer = QTimer(self)
-        self._timer.setInterval(POLL_INTERVAL_MS)
-        self._timer.timeout.connect(self._poll)
+        self._poller = _PollWorker(self)
+        self._poller.polled.connect(self._on_polled)
         self._logging = False
+        # label → monotonic time its active row was last repainted, for the
+        # _ACTIVE_ROW_REFRESH_MS throttle.
+        self._last_row_refresh: dict[str, float] = {}
         self._entries: list[_TransmissionEntry] = []
         self._active_entries: dict[str, _TransmissionEntry | None] = {}  # label → active entry
         self._active_entry_rows: dict[str, int] = {}                     # label → row index
@@ -193,8 +288,9 @@ class LogPanel(QWidget):
             radio.transcription_manager.transcription_ready.connect(
                 lambda ri, text, job, r=radio: self._on_transcription_ready(ri, text, job, r)
             )
-        if not self._timer.isActive():
-            self._timer.start()
+        self._poller.set_radios(self._radios)
+        if not self._poller.isRunning():
+            self._poller.start()
         self._set_controls(connected=True, logging=self._logging)
 
     def remove_radio(self, label: str) -> None:
@@ -213,19 +309,46 @@ class LogPanel(QWidget):
         self._squelch_closed_mono.pop(label, None)
         self._capture_paused.discard(label)
         self._paused_labels.discard(label)
+        self._last_row_refresh.pop(label, None)
+
+        # Drop it from the poller before anything else can touch a closed port.
+        self._poller.set_radios(self._radios)
+        self._poller.set_paused(self._paused_labels)
 
         if not self._radios:
             self._logging = False
-            self._timer.stop()
+            self.shutdown()
         self._set_controls(connected=len(self._radios) > 0, logging=self._logging)
 
+    def shutdown(self) -> None:
+        """Stop the poll thread and wait for it to finish.
+
+        Safe to call repeatedly. Must complete before the serial ports are
+        closed, so the worker can never touch a freed handle.
+        """
+        if not self._poller.isRunning():
+            return
+        self._poller.stop()
+        if not self._poller.wait(2000):
+            log.warning("LogPanel: poll thread did not stop within 2s")
+
     def pause_polling(self, label: str | None = None) -> None:
-        """Pause polling for one radio (or all if label is None)."""
+        """Pause polling for one radio (or all if label is None).
+
+        Used around multi-command sequences (upload/download) that must own the
+        port for a whole PRG…EPG session, and at shutdown. The port lock alone
+        cannot express that: it serialises individual transactions, not groups.
+
+        The poller may be mid-transaction when this returns; the lock in
+        ``ScannerProtocol`` keeps that transaction from interleaving with the
+        caller's, so no further synchronisation is needed here.
+        """
         if label is not None:
             self._paused_labels.add(label)
         else:
             for r in self._radios:
                 self._paused_labels.add(r.label)
+        self._poller.set_paused(self._paused_labels)
 
     def resume_polling(self, label: str | None = None) -> None:
         """Resume polling for one radio (or all if label is None)."""
@@ -233,8 +356,10 @@ class LogPanel(QWidget):
             self._paused_labels.discard(label)
         else:
             self._paused_labels.clear()
-        if self._radios and not self._timer.isActive():
-            self._timer.start()
+        self._poller.set_paused(self._paused_labels)
+        if self._radios and not self._poller.isRunning():
+            self._poller.set_radios(self._radios)
+            self._poller.start()
 
     # ------------------------------------------------------------------
     # Logging controls
@@ -278,22 +403,35 @@ class LogPanel(QWidget):
         self._squelch_closed_mono.clear()
         self._capture_paused.clear()
         self._table.setRowCount(0)
-        self._set_controls(connected=len(self._radios) > 0, logging=self._timer.isActive())
+        self._last_row_refresh.clear()
+        self._set_controls(connected=len(self._radios) > 0, logging=self._logging)
 
     # ------------------------------------------------------------------
     # Polling
     # ------------------------------------------------------------------
 
-    def _poll(self) -> None:
+    def _on_polled(self, results: list) -> None:
+        """Apply one round of poll results. Runs on the main thread.
+
+        The serial I/O already happened on the poll thread; this is pure state
+        machine and UI, unchanged from when both ran together on a timer.
+        """
         now_mono = time.monotonic()
         lost_labels: list[str] = []
-        for radio in list(self._radios):
-            if radio.label in self._paused_labels:
+        by_label = {r.label: r for r in self._radios}
+
+        for label, info, connection_lost in results:
+            radio = by_label.get(label)
+            if radio is None:
+                continue          # disconnected between poll and delivery
+            if label in self._paused_labels:
+                continue          # paused while this result was in flight
+            if connection_lost:
+                # The serial device dropped out (e.g. USB adapter unplugged).
+                log.warning("Lost serial connection to %s — disconnecting", label)
+                lost_labels.append(label)
                 continue
             try:
-                info = radio.proto.get_received_channel_info()
-                label = radio.label
-
                 if info:
                     self.channel_info_updated.emit(label, info)
                     if not self._logging:
@@ -311,8 +449,10 @@ class LogPanel(QWidget):
                             self._finalize_entry(radio, label)
                             self._begin_entry(radio, info)
                     else:
-                        # Ongoing transmission — update duration in place
-                        self._refresh_row(self._active_entry_rows[label])
+                        # Ongoing transmission — update duration in place, at a
+                        # throttled rate so the poll cadence doesn't drive table
+                        # repaints on the main thread.
+                        self._refresh_active_row(label)
                 else:
                     # No signal on this radio right now — a good moment to
                     # recycle its input stream if it has aged, so it never gets
@@ -348,17 +488,31 @@ class LogPanel(QWidget):
                         if closed_for >= CONVERSATION_GAP_MS / 1000.0:
                             # Grace window elapsed with no re-key — finalize.
                             self._finalize_entry(radio, label)
-            except SerialConnectionLost:
-                # The serial device dropped out (e.g. USB adapter unplugged).
-                # Defer teardown until the loop finishes so we don't mutate
-                # self._radios mid-iteration, then notify the main window.
-                log.warning("Lost serial connection to %s — disconnecting", radio.label)
-                lost_labels.append(radio.label)
             except Exception:
-                log.exception("Error polling %s — continuing", radio.label)
+                # Serial faults are reported via the connection_lost flag above;
+                # anything reaching here is a state-machine/UI bug. Keep the
+                # other radios in this batch working.
+                log.exception("Error handling poll result for %s — continuing", label)
 
         for label in lost_labels:
             self.radio_connection_lost.emit(label)
+
+    def _refresh_active_row(self, label: str) -> None:
+        """Repaint an in-progress row's duration, throttled and visibility-gated.
+
+        Skipped entirely while the panel is hidden — the duration is derived
+        from the entry on every repaint, so whatever is shown when the tab comes
+        back to the front is already correct.
+        """
+        row = self._active_entry_rows.get(label)
+        if row is None or not self.isVisible():
+            return
+        now = time.monotonic()
+        last = self._last_row_refresh.get(label, 0.0)
+        if (now - last) * 1000.0 < _ACTIVE_ROW_REFRESH_MS:
+            return
+        self._last_row_refresh[label] = now
+        self._refresh_row(row)
 
     @staticmethod
     def _same_source(entry: _TransmissionEntry, info: dict) -> bool:

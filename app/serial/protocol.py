@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import termios
+import threading
 import time
 from typing import Optional
 
@@ -59,6 +60,15 @@ class ScannerProtocol:
 
     def __init__(self, conn: serial.Serial) -> None:
         self._conn = conn
+        # Serialises whole command/response transactions. A scanner command is
+        # write-then-read-until-CR on a shared port: if two threads interleave,
+        # one reads the other's response and both derail. Callers used to be
+        # implicitly safe because everything ran on the main thread; now that
+        # LogPanel polls GLG from a background thread while the keypad and the
+        # upload/download dialogs still issue commands from their own threads,
+        # the port needs a real lock. Reentrant so a high-level method may call
+        # another one without deadlocking.
+        self._io_lock = threading.RLock()
 
     # ------------------------------------------------------------------
     # Low-level send / receive
@@ -68,12 +78,33 @@ class ScannerProtocol:
         """
         Send a command and return the response data payload.
 
+        Thread-safe: the whole transaction is serialised, so concurrent callers
+        queue rather than corrupting each other's responses.
+
         :param cmd:    Command name, e.g. "MDL", "CIN"
         :param params: Optional parameters
         :returns:      Response payload (everything after the first comma),
                        or empty string if the response has no payload.
         :raises ProtocolError: On timeout or ERR response.
         """
+        with self._io_lock:
+            return self._send_command_locked(cmd, *params)
+
+    def wait_until_idle(self, timeout: float = 5.0) -> bool:
+        """Block until no command transaction is in flight on this port.
+
+        Call before closing the underlying serial handle so a background poll
+        cannot be part-way through a write/read when the device disappears from
+        under it. Returns False if the timeout expired with a transaction still
+        running.
+        """
+        if not self._io_lock.acquire(timeout=timeout):
+            return False
+        self._io_lock.release()
+        return True
+
+    def _send_command_locked(self, cmd: str, *params: str) -> str:
+        """Body of :meth:`send_command`; caller must hold ``_io_lock``."""
         if params:
             full_cmd = cmd + "," + ",".join(str(p) for p in params)
         else:
