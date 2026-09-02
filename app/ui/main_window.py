@@ -45,6 +45,7 @@ from app.audio.summary_scheduler import SummaryScheduler
 from app.data import file_996
 from app.data.models import ScannerConfig, Channel
 from app.data.radio_connection import RadioConnection
+from app.health_monitor import HealthMonitor
 
 log = logging.getLogger(__name__)
 
@@ -317,6 +318,30 @@ class MainWindow(QMainWindow):
         self._tabs.setTabEnabled(self._atc_tab_idx, False)
 
         self.setCentralWidget(self._tabs)
+
+        # Health sampling. Started last so the tab widget exists for the
+        # context provider below.
+        self._health_monitor = HealthMonitor(self)
+        self._health_monitor.set_context_provider(self._health_context)
+        self._health_monitor.start()
+
+    def _health_context(self) -> str:
+        """Short description of what the UI is showing, for health log lines.
+
+        Recorded alongside every stall so a future CPU regression can be tied
+        to the screen that was in front — the fact that was missing when the
+        2026-08-14 capture degradation was investigated. Must stay cheap: this
+        runs on every summary line and every stall warning.
+        """
+        try:
+            name = self._tabs.tabText(self._tabs.currentIndex()) or "(none)"
+        except Exception:
+            return ""
+        if not self.isVisible():
+            return f"{name} (window hidden)"
+        if self.isMinimized():
+            return f"{name} (minimised)"
+        return name
 
     # ------------------------------------------------------------------
     # Status bar
@@ -705,6 +730,14 @@ class MainWindow(QMainWindow):
 
         if radio in self._radios:
             self._radios.remove(radio)
+        # The poll thread may have started a transaction on this port just
+        # before remove_radio() dropped it; wait that out so we never close the
+        # handle mid-read.
+        if not radio.proto.wait_until_idle():
+            log.warning(
+                "Radio %s still had a serial transaction in flight at teardown",
+                radio.label,
+            )
         port_manager.close_port(radio.conn)
 
     def _on_radio_connection_lost(self, label: str) -> None:
@@ -931,8 +964,14 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
         # Stop log panel polling immediately so no more serial calls are made
-        # while we're tearing down connections and threads below.
+        # while we're tearing down connections and threads below. Polling now
+        # runs on its own thread, so pausing is not enough — we must wait for it
+        # to actually exit before close_port() frees the handles underneath it.
         self._log_panel.pause_polling()
+        self._log_panel.shutdown()
+
+        if hasattr(self, "_health_monitor"):
+            self._health_monitor.stop()
 
         # If a connection attempt is still in progress, wait for it briefly.
         try:
@@ -944,6 +983,7 @@ class MainWindow(QMainWindow):
         for radio in self._radios:
             if radio.transcription_manager:
                 radio.transcription_manager.shutdown()
+            radio.proto.wait_until_idle()
             port_manager.close_port(radio.conn)
 
         if self._adsb_receiver:

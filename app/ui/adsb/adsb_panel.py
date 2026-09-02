@@ -81,12 +81,29 @@ class ADSBPanel(QWidget):
         self._tracker = AircraftStateTracker()
         self._icao_to_row: dict[str, int] = {}  # ICAO → current table row
         self._logger: Optional[ADSBLogger] = None
+        # True when rows were purged while hidden, so the table no longer
+        # matches the tracker and needs a full rebuild before being shown.
+        self._grid_stale = False
         self._build_ui()
 
         self._timer = QTimer(self)
         self._timer.setInterval(_REFRESH_MS)
         self._timer.timeout.connect(self._refresh_grid)
         self._timer.start()
+
+    def showEvent(self, event) -> None:
+        """Rebuild the grid when the tab comes to the front.
+
+        While hidden we skip table updates, so rows can be stale or reference
+        purged aircraft. Clearing and re-upserting from the tracker is simpler
+        and cheaper than trying to replay the missed deltas.
+        """
+        super().showEvent(event)
+        if self._grid_stale:
+            self._grid_stale = False
+            self._table.setRowCount(0)
+            self._icao_to_row.clear()
+        self._update_table({})
 
     # ------------------------------------------------------------------
     # Public API (called by MainWindow)
@@ -174,7 +191,30 @@ class ADSBPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _refresh_grid(self) -> None:
+        """Tracker upkeep every tick; table work only when actually on screen.
+
+        The purge (and the CSV logging of purged aircraft) must run whether or
+        not this tab is in front, otherwise records would be lost and the
+        tracker would grow without bound while the user is on another tab. The
+        table rebuild is the expensive half and is pure presentation, so it is
+        skipped while hidden and replayed on showEvent.
+        """
         removed = self._tracker.purge(grey_secs=_GREY_SECS, remove_secs=_REMOVE_SECS)
+
+        # Log removed aircraft before we drop them from the grid.
+        if removed and self._logger:
+            for ac in removed.values():
+                self._logger.log(ac)
+
+        if not self.isVisible():
+            # Rows for the aircraft just purged are still in the table, so the
+            # grid is now out of date; rebuild it from scratch when shown.
+            self._grid_stale = True
+            return
+
+        self._update_table(removed)
+
+    def _update_table(self, removed: dict) -> None:
         snapshot = self._tracker.snapshot()
         now = datetime.now()
 
@@ -185,11 +225,6 @@ class ADSBPanel(QWidget):
             item = self._table.item(row, COL_ICAO)
             if item:
                 self._icao_to_row[item.text()] = row
-
-        # Log removed aircraft before we drop them from the grid.
-        if removed and self._logger:
-            for ac in removed.values():
-                self._logger.log(ac)
 
         # Remove purged rows in descending row order so earlier indices stay
         # valid as rows are deleted, then rebuild the map from column 0.

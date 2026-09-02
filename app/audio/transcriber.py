@@ -114,6 +114,25 @@ _NO_SPEECH_PROB_DROP = 0.85   # if every segment is this confident there is no
                               # never suppressed by this gate.
 _REPEAT_DROP_COUNT = 3        # a single sentence repeated this many times is a
                               # Whisper decode loop, not a real transmission.
+
+# Word-level decode loops. The sentence rule above only catches loops that
+# repeat a *punctuated* sentence ("Thank you. Thank you. Thank you."). Real
+# loops mostly repeat a word or short phrase inside one unpunctuated run —
+# "BE BE BE BE...", "Desiphoning Desiphoning...", "Now, listen, listen,
+# listen,...", "Descent 3, Descent 3, Descent 3..." — which collapses to a
+# single "sentence" and sails straight through. Those dominated the garbage in
+# the 2026-08-14 transcript.
+#
+# Thresholds are deliberately conservative, because radio traffic legitimately
+# repeats: unit roll-calls ("Engine 1, Engine 3, Engine 2, Car 1"), read-backs,
+# and doubled acknowledgements ("Received. Received.") must survive. Requiring
+# four consecutive repeats of the same phrase *and* that the repetition make up
+# most of the transcript leaves those intact — a roll-call repeated twice, or a
+# phrase repeated three times, is kept.
+_MAX_REPEAT_PHRASE_WORDS = 4     # longest phrase length checked for looping
+_PHRASE_REPEAT_DROP_COUNT = 4    # consecutive repeats before it counts as a loop
+_PHRASE_REPEAT_COVERAGE = 0.5    # ...and the loop must cover this much of the text
+
 _PUNCT_RE = re.compile(r"[^\w\s']+")
 _SENTENCE_SPLIT_RE = re.compile(r"[.!?]+")
 
@@ -122,6 +141,37 @@ def _normalize_phrase(text: str) -> str:
     """Lowercase, drop surrounding punctuation, collapse whitespace."""
     text = _PUNCT_RE.sub(" ", text.lower())
     return " ".join(text.split())
+
+
+def _max_phrase_repetition(tokens: list[str]) -> tuple[int, int]:
+    """Find the longest run of an immediately-repeated 1..4 word phrase.
+
+    Returns ``(repeat_count, tokens_covered)`` for the best run found, or
+    ``(1, 0)`` when nothing repeats back-to-back. Only *consecutive* repeats
+    count, so a phrase that recurs naturally at intervals through a real
+    transmission is not treated as a loop.
+    """
+    best = (1, 0)
+    total = len(tokens)
+    for n in range(1, _MAX_REPEAT_PHRASE_WORDS + 1):
+        if total < n * 2:
+            break
+        i = 0
+        while i + n * 2 <= total:
+            block = tokens[i:i + n]
+            reps = 1
+            j = i + n
+            while j + n <= total and tokens[j:j + n] == block:
+                reps += 1
+                j += n
+            if reps > 1:
+                covered = reps * n
+                if reps > best[0] or (reps == best[0] and covered > best[1]):
+                    best = (reps, covered)
+                i = j          # skip the run we just consumed; keeps this linear
+            else:
+                i += 1
+    return best
 
 
 def _filter_hallucination(text: str, segments: list) -> str:
@@ -158,6 +208,14 @@ def _filter_hallucination(text: str, segments: list) -> str:
     # break." x6). Real speech does not repeat one sentence verbatim this often.
     if len(unique) == 1 and len(sentences) >= _REPEAT_DROP_COUNT:
         return ""
+
+    # Decode loop at word/phrase level, inside a single unpunctuated run.
+    tokens = _normalize_phrase(text).split()
+    if tokens:
+        reps, covered = _max_phrase_repetition(tokens)
+        if (reps >= _PHRASE_REPEAT_DROP_COUNT
+                and covered / len(tokens) >= _PHRASE_REPEAT_COVERAGE):
+            return ""
 
     # Whole transcript is nothing but filler. Covers "Thank you.",
     # "Thanks for watching!", and "Thank you. Thank you." (one unique sentence).

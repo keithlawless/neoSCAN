@@ -191,7 +191,9 @@ def _panel_with_radio():
     panel = LogPanel()
     radio = _FakeRadio("R1")
     panel.add_radio(radio)
-    panel._timer.stop()          # drive _poll manually
+    # Polling now runs on its own thread; stop it so these tests can feed poll
+    # results in synchronously and deterministically.
+    panel.shutdown()
     panel._start_logging()
     return panel, radio
 
@@ -202,8 +204,9 @@ OFF: dict = {}
 
 
 def _step(panel, radio, info):
+    """Deliver one poll result, as the poll thread would."""
     radio.proto.info = info
-    panel._poll()
+    panel._on_polled([(radio.label, info or None, False)])
 
 
 def _hold_closed_past_debounce(panel, label="R1"):
